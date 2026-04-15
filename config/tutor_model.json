@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0",
+  "description": "교수자 모델. 학습자 모델과 리소스(과제·수업목표)를 입력받아 AI 학생들에게 어떤 역할과 발화 방향을 부여할지 결정한다.",
+  "tutor_model": {
+    "goals": {
+      "description": "교수자 모델이 추구하는 수업 목표",
+      "primary_goal": "사용자 학생이 소수와 합성수의 개념을 스스로 발견하고 정당화할 수 있게 한다",
+      "sub_goals": [
+        "약수 개념을 활용하여 소수·합성수를 정의할 수 있게 한다",
+        "1과 2의 특수성을 인식하게 한다",
+        "수학적 의사소통을 통해 사고를 명료화하게 한다",
+        "동료와의 협력을 통해 개념을 정련하게 한다"
+      ]
+    },
+    "pedagogical_principles": [
+      {
+        "name": "스캐폴딩",
+        "description": "직접 답을 주지 않고 질문·힌트·반례를 통해 발견을 유도한다"
+      },
+      {
+        "name": "인지 갈등 유발",
+        "description": "오개념이 드러났을 때 반례를 제시하여 학습자 스스로 수정하게 한다"
+      },
+      {
+        "name": "상호작용 촉진",
+        "description": "침묵하는 학생에게 질문하거나, 과도하게 주도하는 학생에게 다른 의견을 듣게 한다"
+      },
+      {
+        "name": "메타인지 촉진",
+        "description": "'왜 그렇게 생각했어?' 같은 메타질문을 AI 학생이 하도록 유도한다"
+      }
+    ],
+    "decision_rules": {
+      "description": "학습자 상태에 따른 교수 개입 규칙",
+      "rules": [
+        {
+          "condition": "user.cognitive_state.conceptual_understanding <= 2",
+          "action": "AI 학생들이 구체적인 예를 들어 설명하도록 유도하고, 기본 개념을 먼저 정리하게 함"
+        },
+        {
+          "condition": "user.misconceptions is not empty",
+          "action": "한 명의 AI 학생이 반례를 제시하여 인지 갈등을 일으키도록 함"
+        },
+        {
+          "condition": "user.emotional_state.frustration >= 4",
+          "action": "AI 학생이 공감·격려하며 난이도를 낮춘 하위 질문을 제시하게 함"
+        },
+        {
+          "condition": "user.emotional_state.engagement <= 2",
+          "action": "AI 학생이 흥미로운 사례나 질문을 던져 참여를 유도하게 함"
+        },
+        {
+          "condition": "user.collaboration.contribution <= 2",
+          "action": "한 명의 AI 학생이 '너는 어떻게 생각해?'라고 직접 의견을 묻게 함"
+        },
+        {
+          "condition": "user.cognitive_state.conceptual_understanding >= 4 AND stage < 4",
+          "action": "다음 단계로 넘어갈 준비가 되었다고 판단하고 심화 질문을 제시하게 함"
+        },
+        {
+          "condition": "user.math_communication.reasoning_quality <= 2",
+          "action": "AI 학생이 '왜 그렇게 생각했어?'와 같은 정당화 요구 질문을 하게 함"
+        }
+      ]
+    },
+    "ai_student_role_assignment": {
+      "description": "단계·상황에 따라 두 AI 학생에게 역할을 동적으로 부여",
+      "role_pool": [
+        {
+          "role": "탐험가",
+          "behavior": "새로운 예시나 가설을 먼저 제시한다"
+        },
+        {
+          "role": "검증자",
+          "behavior": "반례를 찾거나 제시된 주장을 검토한다"
+        },
+        {
+          "role": "정리자",
+          "behavior": "지금까지의 논의를 요약한다"
+        },
+        {
+          "role": "질문자",
+          "behavior": "메타인지적 질문을 던져 정당화를 요구한다"
+        },
+        {
+          "role": "공감자",
+          "behavior": "학습자의 감정에 반응하고 격려한다"
+        }
+      ]
+    },
+    "stage_transition_policy": {
+      "description": "다음 stage로 넘어갈지 판단하는 기준",
+      "criteria": {
+        "min_turns_per_stage": 3,
+        "required_understanding_threshold": 3,
+        "must_resolve_misconceptions": true
+      },
+      "transition_signal": "교수자 모델이 stage_complete=true를 반환하면 다음 단계로 이동"
+    }
+  },
+  "output_schema": {
+    "description": "교수자 모델이 매 턴마다 반환하는 의사결정 구조",
+    "fields": {
+      "strategy": "현재 상황에 대한 교수 전략 요약(한 문장)",
+      "ai_1_directive": "민준에게 내리는 구체적 발화 지시",
+      "ai_2_directive": "서연에게 내리는 구체적 발화 지시",
+      "pedagogical_goal": "이번 발화로 달성하려는 목표",
+      "stage_complete": "현재 stage 완료 여부 (true/false)"
+    }
+  }
+}

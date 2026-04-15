@@ -1,0 +1,173 @@
+{
+  "schema_version": "1.0",
+  "description": "협력학습 상황에서 각 학생의 상태를 나타내는 학습자 모델. 사용자 발화를 분석하는 LLM이 이 모델을 업데이트한다.",
+  "models": {
+    "cognitive_state": {
+      "name": "인지 상태",
+      "name_en": "Cognitive State",
+      "description": "학습자가 현재 수학 개념을 얼마나 이해하고 있는지, 어떤 오개념을 가지고 있는지를 나타냄",
+      "dimensions": {
+        "conceptual_understanding": {
+          "name": "개념 이해도",
+          "description": "소수·합성수·약수 등 핵심 개념의 이해 수준",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "개념이 형성되지 않음 (예: 소수와 합성수를 구분하지 못함)",
+            "2": "단편적으로 이해함 (용어는 알지만 정의를 잘못 적용)",
+            "3": "기본 정의를 이해함 (약수의 개수로 판별 가능)",
+            "4": "심화된 이해 (경계 사례인 1과 2를 정확히 다룸)",
+            "5": "전이 가능한 이해 (다른 맥락의 수에도 개념을 적용)"
+          },
+          "default": 3
+        },
+        "procedural_fluency": {
+          "name": "절차적 유창성",
+          "description": "약수를 구하거나 소수를 판별하는 절차를 정확히 수행하는 능력",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "절차를 모름",
+            "2": "일부 절차만 수행 가능",
+            "3": "기본 절차를 정확히 수행",
+            "4": "유창하게 수행하며 약간의 변형도 가능",
+            "5": "다양한 전략을 유연하게 적용"
+          },
+          "default": 3
+        },
+        "misconceptions": {
+          "name": "오개념",
+          "description": "관찰된 수학적 오개념들의 리스트",
+          "type": "list",
+          "default": [],
+          "common_misconceptions_for_task": [
+            "1은 소수이다",
+            "모든 홀수는 소수이다",
+            "2는 짝수이므로 소수가 아니다",
+            "약수와 배수를 혼동"
+          ]
+        }
+      }
+    },
+    "math_communication": {
+      "name": "수학적 의사소통 능력",
+      "name_en": "Mathematical Communication",
+      "description": "수학적 아이디어를 언어·기호로 표현하고 논증하는 능력",
+      "dimensions": {
+        "expression_clarity": {
+          "name": "표현 명확성",
+          "description": "자신의 생각을 명확하게 언어로 표현하는 정도",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "표현하지 못함",
+            "2": "단편적으로 표현",
+            "3": "이해 가능한 수준으로 표현",
+            "4": "명확하고 조직적으로 표현",
+            "5": "정교하고 청중을 고려하여 표현"
+          },
+          "default": 3
+        },
+        "reasoning_quality": {
+          "name": "논증의 수준",
+          "description": "주장에 대한 근거 제시 및 정당화",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "근거 없음",
+            "2": "직관적·경험적 근거",
+            "3": "부분적 논리 근거",
+            "4": "완전한 논리적 논증",
+            "5": "일반화 및 반례 검토까지 수행"
+          },
+          "default": 3
+        },
+        "math_vocabulary_use": {
+          "name": "수학 용어 사용",
+          "description": "'약수', '소수', '합성수' 등 수학 용어를 적절히 사용하는 정도",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "일상어만 사용",
+            "2": "용어를 부정확하게 사용",
+            "3": "기본 용어를 적절히 사용",
+            "4": "용어를 정확·풍부하게 사용",
+            "5": "전문적 수준의 용어 구사"
+          },
+          "default": 3
+        }
+      }
+    },
+    "emotional_state": {
+      "name": "감정 상태",
+      "name_en": "Emotional State",
+      "description": "학습 과정에서의 정서적 상태",
+      "dimensions": {
+        "engagement": {
+          "name": "몰입도",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "무관심", "2": "소극적", "3": "보통", "4": "적극적", "5": "완전 몰입"
+          },
+          "default": 3
+        },
+        "confidence": {
+          "name": "자신감",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "매우 불안", "2": "불안", "3": "보통", "4": "자신감", "5": "매우 높음"
+          },
+          "default": 3
+        },
+        "frustration": {
+          "name": "좌절감",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "없음", "2": "약간", "3": "보통", "4": "높음", "5": "매우 높음"
+          },
+          "default": 2
+        }
+      }
+    },
+    "collaboration": {
+      "name": "협력 역량",
+      "name_en": "Collaboration Competency",
+      "description": "그룹 내에서 협력하여 문제를 해결하는 능력",
+      "dimensions": {
+        "contribution": {
+          "name": "기여도",
+          "description": "토론과 문제 해결에 능동적으로 기여하는 정도",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "무참여", "2": "최소 참여", "3": "보통 기여", "4": "적극 기여", "5": "주도적 기여"
+          },
+          "default": 3
+        },
+        "responsiveness": {
+          "name": "반응성",
+          "description": "동료 의견을 경청하고 반응하는 능력",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "무반응", "2": "소극적", "3": "기본 반응", "4": "적극적", "5": "건설적 확장"
+          },
+          "default": 3
+        },
+        "help_seeking_giving": {
+          "name": "도움 주고받기",
+          "description": "필요시 도움을 요청하거나 동료를 지원하는 능력",
+          "type": "ordinal",
+          "scale": [1, 5],
+          "rubric": {
+            "1": "고립", "2": "수동적", "3": "기본 상호작용", "4": "적극적 지원", "5": "상호 촉진"
+          },
+          "default": 3
+        }
+      }
+    }
+  }
+}
