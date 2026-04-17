@@ -20,9 +20,6 @@ team4/
 │   ├── 05_stage_closure.md
 │   ├── 06_misconception_challenge.md
 │   └── 07_encouragement.md
-├── fonts/                  # 한글 폰트 (OFL 1.1 라이선스)
-│   ├── NanumGothic.ttf
-│   └── OFL.txt
 ├── __init__.py             # 패키지 진입점 + bootstrap()
 ├── config_loader.py        # JSON/MD 로더
 ├── learner_model.py        # 학습자 모델 인스턴스 초기화
@@ -36,8 +33,9 @@ team4/
 ## Colab 실행 (권장)
 
 ```python
-# 1. 의존성 + 리포 클론 (폰트는 리포에 동봉되어 apt 설치 불필요)
+# 1. 의존성 + 폰트 + 리포 클론
 !pip install anthropic gradio -q
+!apt-get -qq install fonts-nanum
 !git clone -q https://github.com/hi-math/team4.git   # 최초 1회
 
 # 2. 경로 설정 (리포지토리 루트)
@@ -54,17 +52,9 @@ from team4 import bootstrap, launch_ui
 ctx = bootstrap(base_path=BASE_PATH,
                 api_key=userdata.get("CLAUDE_API_KEY"),
                 model=MODEL,
-                setup_fonts=True)     # team4/fonts/NanumGothic.ttf 자동 등록
+                setup_fonts=True)
 launch_ui(**ctx, share=True)
 ```
-
-## 한글 폰트
-
-`team4/fonts/NanumGothic.ttf` (OFL 1.1) 가 패키지에 포함되어 있어 `apt-get install
-fonts-nanum` 같은 시스템 설치가 필요 없습니다. 로컬(맥·윈도우)에서도 그대로 동작.
-
-`setup_korean_font()` 우선순위:
-1. 명시 `font_path` → 2. `team4/fonts/NanumGothic.ttf` (번들) → 3. 시스템 경로
 
 ## 모듈별 역할
 

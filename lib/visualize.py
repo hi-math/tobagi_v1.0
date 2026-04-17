@@ -3,7 +3,6 @@
 Gradio 에서는 `*_figure()` (Figure 반환), CLI 에서는 `plot_*()` (plt.show) 를 사용한다.
 """
 
-import os
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -14,53 +13,18 @@ import matplotlib.font_manager as fm
 # 한글 폰트
 # --------------------------------------------------------------------
 
-# team4/fonts/NanumGothic.ttf — 패키지에 동봉된 기본 폰트 (OFL 1.1)
-_BUNDLED_FONT = os.path.join(os.path.dirname(__file__), "fonts", "NanumGothic.ttf")
-
-# 시스템 폰트 탐색 경로 (리눅스/맥/윈도우 순)
-_SYSTEM_FALLBACKS = (
-    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
-    "/Library/Fonts/NanumGothic.ttf",
-    "C:/Windows/Fonts/NanumGothic.ttf",
-)
-
-
-def setup_korean_font(font_path=None, verbose=True):
+def setup_korean_font(font_path="/usr/share/fonts/truetype/nanum/NanumGothic.ttf"):
     """Matplotlib 한글 폰트(NanumGothic) 등록.
 
-    우선순위:
-        1. 명시된 `font_path`
-        2. `team4/fonts/NanumGothic.ttf` (패키지 번들)
-        3. 시스템 설치본 (apt `fonts-nanum`, 맥/윈도우 기본 경로)
-
-    모두 실패하면 경고만 출력하고 조용히 넘어간다.
-
-    Returns:
-        실제로 등록된 폰트 파일 경로 (str) 또는 실패 시 None
+    Colab 에서는 먼저 `!apt-get -qq install fonts-nanum` 을 실행해야 파일이 존재한다.
+    실패하면 경고만 출력하고 조용히 넘어간다.
     """
-    candidates = []
-    if font_path:
-        candidates.append(font_path)
-    candidates.append(_BUNDLED_FONT)
-    candidates.extend(_SYSTEM_FALLBACKS)
-
-    for path in candidates:
-        if not path or not os.path.exists(path):
-            continue
-        try:
-            fm.fontManager.addfont(path)
-            matplotlib.rcParams["font.family"] = "NanumGothic"
-            matplotlib.rcParams["axes.unicode_minus"] = False
-            if verbose:
-                print(f"✅ 한글 폰트 등록: {path}")
-            return path
-        except Exception as e:
-            if verbose:
-                print(f"⚠️ {path} 로드 실패: {e}")
-
-    if verbose:
-        print("⚠️ 한글 폰트를 찾지 못했습니다. 차트의 한글이 □ 로 표시될 수 있습니다.")
-    return None
+    try:
+        fm.fontManager.addfont(font_path)
+        matplotlib.rcParams["font.family"] = "NanumGothic"
+        matplotlib.rcParams["axes.unicode_minus"] = False
+    except Exception as e:
+        print(f"⚠️ 한글 폰트 로드 실패 ({font_path}): {e}")
 
 
 # --------------------------------------------------------------------
