@@ -73,7 +73,8 @@ def bootstrap(base_path, api_key, model="claude-sonnet-4-20250514",
     client = anthropic.Anthropic(api_key=api_key)
     api = ClaudeAPI(client, model=model)
     if setup_fonts:
-        setup_korean_font()
+        import os as _os
+        setup_korean_font(_os.path.join(base_path, "fonts", "NanumGothic.ttf"))
     return {
         "config": config,
         "prompts": prompts,
