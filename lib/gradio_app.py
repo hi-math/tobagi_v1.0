@@ -125,7 +125,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             with gr.Column(scale=2):
                 with gr.Tabs():
                     with gr.Tab("🕸️ 레이더"):
-                        radar = gr.Plot(label="3인 비교")
+                        radar = gr.Plot(label="사용자 레이더")
                         gr.Button("🔄 갱신").click(_radar, outputs=radar)
                     with gr.Tab("📈 변화 추이"):
                         hist_plot = gr.Plot(label="사용자 단계별 변화")
@@ -151,5 +151,5 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         demo.load(_history, outputs=hist_plot)
         demo.load(_model_md, outputs=model_md)
 
-    demo.launch(share=share, debug=False)
+    demo.launch(share=share, debug=False, quiet=True)
     return demo

@@ -50,37 +50,28 @@ def print_user_model(config, learner_models):
 # --------------------------------------------------------------------
 
 def radar_figure(config, learner_models):
-    """사용자·AI 두 명의 학습자 모델을 레이더로 비교. Figure 반환."""
-    labels, vals = [], {"user": [], "ai_1": [], "ai_2": []}
+    """사용자의 학습자 모델을 레이더로 표시. Figure 반환."""
+    labels, vals = [], []
     for mk, mv in config["learner_model_schema"]["models"].items():
         for dk, dv in mv["dimensions"].items():
-            sample = learner_models["user"]["models"][mk][dk]["value"]
-            if isinstance(sample, (int, float)):
+            v = learner_models["user"]["models"][mk][dk]["value"]
+            if isinstance(v, (int, float)):
                 labels.append(dv["name"])
-                for sk in ("user", "ai_1", "ai_2"):
-                    vals[sk].append(learner_models[sk]["models"][mk][dk]["value"])
+                vals.append(v)
 
     N = len(labels)
     angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
     angles += angles[:1]
+    vals_plot = vals + vals[:1]
 
     fig, ax = plt.subplots(figsize=(7, 7), subplot_kw=dict(polar=True))
-    colors = {"user": "#E74C3C", "ai_1": "#3498DB", "ai_2": "#2ECC71"}
-    names = {
-        "user": "사용자",
-        "ai_1": config["personas"]["ai_students"]["ai_1"]["name"],
-        "ai_2": config["personas"]["ai_students"]["ai_2"]["name"],
-    }
-    for sk in ("user", "ai_1", "ai_2"):
-        v = vals[sk] + vals[sk][:1]
-        ax.plot(angles, v, "o-", linewidth=2, label=names[sk], color=colors[sk])
-        ax.fill(angles, v, alpha=0.15, color=colors[sk])
+    ax.plot(angles, vals_plot, "o-", linewidth=2, color="#E74C3C")
+    ax.fill(angles, vals_plot, alpha=0.2, color="#E74C3C")
     ax.set_xticks(angles[:-1])
     ax.set_xticklabels(labels, size=9)
     ax.set_ylim(0, 5)
     ax.set_yticks([1, 2, 3, 4, 5])
-    ax.legend(loc="upper right", bbox_to_anchor=(1.25, 1.1))
-    ax.set_title("학습자 모델 비교 (Radar)", size=13, pad=20, fontweight="bold")
+    ax.set_title("사용자 학습자 모델 (Radar)", size=13, pad=20, fontweight="bold")
     fig.tight_layout()
     return fig
 
