@@ -19,7 +19,7 @@
 
 from .config_loader import load_config, load_json, load_md
 from .learner_model import create_learner_model_instance, init_learners
-from .llm_api import ClaudeAPI, extract_json, render_prompt
+from .llm_api import ClaudeAPI, extract_json, render_prompt, DEFAULT_HAIKU, DEFAULT_SONNET
 from .session import CollaborativeSession
 from .visualize import (
     setup_korean_font,
@@ -41,6 +41,7 @@ __all__ = [
     "create_learner_model_instance", "init_learners",
     # llm
     "ClaudeAPI", "extract_json", "render_prompt",
+    "DEFAULT_HAIKU", "DEFAULT_SONNET",
     # session
     "CollaborativeSession",
     # visualize
@@ -52,14 +53,18 @@ __all__ = [
 ]
 
 
-def bootstrap(base_path, api_key, model="claude-sonnet-4-20250514",
+def bootstrap(base_path, api_key, model=DEFAULT_HAIKU,
               setup_fonts=False):
     """한 번의 호출로 config/prompts/학습자모델/API 객체를 모두 생성.
 
     Args:
         base_path:  team4 리포지토리 루트 경로 (config/, prompts/ 하위 포함)
         api_key:    Anthropic API 키
-        model:      Claude 모델 식별자
+        model:      Claude 모델 식별자 (기본: Haiku 4.5 — 빠른 응답)
+                    옵션:
+                      - "claude-haiku-4-5-20251001"   (DEFAULT_HAIKU, 빠름)
+                      - "claude-sonnet-4-20250514"    (DEFAULT_SONNET, 품질)
+                      - 그 외 Anthropic 모델 식별자
         setup_fonts: True면 NanumGothic 폰트 등록까지 실행
 
     Returns:

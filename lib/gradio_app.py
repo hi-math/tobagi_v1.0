@@ -1,4 +1,4 @@
-"""Gradio 채팅 인터페이스.
+"""Gradio 채팅 인터페이스 (V4 + 토큰 스트리밍 + 새로고침 싱크).
 
 왼쪽 패널: Chatbot(발화자별 컬러 버블) + 입력 / 오른쪽 탭: 레이더 · 변화 추이 · 학습자모델 · 교수자 Decision
 
@@ -20,13 +20,8 @@ from .visualize import (
 
 
 def launch_ui(*, config, prompts, learner_models, api, share=True):
-    """협력학습 세션을 Gradio Blocks UI로 기동.
-
-    Args:
-        config, prompts, learner_models, api: bootstrap() 결과를 그대로 주입.
-        share: Colab 이면 True (공용 링크 72시간), 로컬 단독 실행이면 False 가능.
-    """
-    import gradio as gr  # 지연 임포트
+    """협력학습 세션을 Gradio Blocks UI로 기동."""
+    import gradio as gr
 
     session = CollaborativeSession(config, prompts, learner_models, api)
     n1 = config["personas"]["ai_students"]["ai_1"]["name"]
@@ -34,31 +29,48 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
     n3 = config["personas"]["ai_students"]["ai_3"]["name"]
     AI_NAME_BY_ID = {"ai_1": n1, "ai_2": n2, "ai_3": n3}
 
-    # -------- 발화자별 버블 스타일 --------
-    # 각 AI와 시스템 메시지에 고유 색상 테두리/배경을 준다.
-    # 🧑‍🎓 아이콘은 사용하지 않고, 좌측 컬러바가 발화자를 구분한다.
     BUBBLE_STYLES = {
-        "ai_1":   {"border": "#2563eb", "bg": "#eff6ff"},  # 민준 — 파랑
-        "ai_2":   {"border": "#db2777", "bg": "#fdf2f8"},  # 서연 — 분홍
-        "ai_3":   {"border": "#16a34a", "bg": "#f0fdf4"},  # 연우 — 초록
-        "system": {"border": "#6b7280", "bg": "#f9fafb"},  # 시스템 — 회색
+        "ai_1":   {"border": "#2563eb", "bg": "#eff6ff"},
+        "ai_2":   {"border": "#db2777", "bg": "#fdf2f8"},
+        "ai_3":   {"border": "#16a34a", "bg": "#f0fdf4"},
+        "system": {"border": "#6b7280", "bg": "#f9fafb"},
     }
 
-    def _bubble(speaker_id: str, name: str, text: str) -> str:
-        """발화자별 색상 버블 HTML (markdown 호환).
-
-        블록 내부 공백 라인을 넣어 안쪽 텍스트가 markdown으로 계속 렌더되게 한다.
-        """
+    def _bubble(speaker_id, name, text, show_name=True):
         s = BUBBLE_STYLES.get(speaker_id, BUBBLE_STYLES["system"])
+        name_html = (
+            f'<span style="color:{s["border"]}; font-weight:700;">{name}</span>\n\n'
+            if show_name else ''
+        )
         return (
             f'<div style="border-left:4px solid {s["border"]};'
             f' background:{s["bg"]}; padding:8px 12px; border-radius:6px;">\n\n'
-            f'<span style="color:{s["border"]}; font-weight:700;">{name}</span>\n\n'
+            f'{name_html}'
             f'{text}\n\n'
             f'</div>'
         )
 
-    def _system_bubble(text: str) -> str:
+    def _split_paragraphs(text):
+        """AI 발화를 빈 줄(\\n\\n) 기준으로 단락 리스트로 분할."""
+        parts = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
+        return parts if parts else [(text or "").strip()]
+
+    def _bubble_messages(aid, name, text):
+        """한 AI 발화를 단락별 Chatbot 메시지 리스트로 변환.
+
+        첫 번째 버블만 이름 헤더를 표시하고, 이어지는 단락들은
+        동일 색상의 버블에 이름 없이 본문만 담아 시각적으로 '연속 발화'처럼 보이게 한다.
+        """
+        parts = _split_paragraphs(text)
+        out = []
+        for i, p in enumerate(parts):
+            out.append({
+                "role": "assistant",
+                "content": _bubble(aid, name, p, show_name=(i == 0)),
+            })
+        return out
+
+    def _system_bubble(text):
         return (
             f'<div style="border-left:4px solid {BUBBLE_STYLES["system"]["border"]};'
             f' background:{BUBBLE_STYLES["system"]["bg"]};'
@@ -67,7 +79,42 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             f'</div>'
         )
 
-    # -------- 시각화 래퍼 (현재 session 이 참조하는 learner_models 사용) --------
+    def _stage_card(stage_num, stage_info):
+        title = stage_info.get("title", "")
+        core_q = stage_info.get("core_question", "")
+        prompt = stage_info.get("prompt", "")
+        accent = "#4f46e5"
+        accent_dark = "#4338ca"
+        body_bg = "#eef2ff"
+        prompt_html = prompt.replace("\n", "<br>")
+        core_q_html = core_q.replace("\n", "<br>")
+        return (
+            f'<div style="border:2px solid {accent}; border-radius:10px; '
+            f'overflow:hidden; margin:6px 0; box-shadow:0 2px 6px rgba(79,70,229,0.15);">'
+            f'<div style="background:{accent}; color:white; padding:10px 16px; '
+            f'font-weight:700; letter-spacing:0.5px; font-size:1.05em;">'
+            f'📋 STAGE {stage_num}'
+            f'</div>'
+            f'<div style="background:{body_bg}; padding:14px 16px; color:#1e1b4b;">'
+            f'<div style="font-size:1.15em; font-weight:700; color:{accent_dark}; '
+            f'margin-bottom:10px;">{title}</div>'
+            + (
+                f'<div style="font-size:0.85em; font-weight:600; color:{accent_dark}; '
+                f'text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">'
+                f'핵심 질문</div>'
+                f'<div style="margin-bottom:12px;">{core_q_html}</div>'
+                if core_q else ''
+            )
+            + (
+                f'<div style="font-size:0.85em; font-weight:600; color:{accent_dark}; '
+                f'text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;">'
+                f'과제</div>'
+                f'<div>{prompt_html}</div>'
+                if prompt else ''
+            )
+            + '</div></div>'
+        )
+
     def _radar():
         return radar_figure(config, learner_models)
 
@@ -87,24 +134,49 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
     def _cps_heatmap():
         return cps_heatmap_figure(config, learner_models)
 
-    # -------- 대화 초기 상태: stage 안내 + ai_1 인트로 --------
     def _initial_history():
         s = session.current_stage_info()
         intro = session.stage_intro_utterance("ai_1")
         return [
             {"role": "assistant",
-             "content": _system_bubble(f"**Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}")},
-            {"role": "assistant",
-             "content": _bubble("ai_1", n1, intro)},
-        ]
+             "content": _stage_card(session.current_stage, s)},
+        ] + _bubble_messages("ai_1", n1, intro)
 
-    # -------- 이벤트 콜백 --------
+    def _rebuild_chat_from_session():
+        """페이지 새로고침 시 session.conversation 기반으로 채팅을 재구성."""
+        if not session.conversation:
+            return _initial_history()
+
+        history = []
+        current_stage_seen = None
+        for m in session.conversation:
+            stage_num = m.get("stage", session.current_stage)
+            if stage_num != current_stage_seen:
+                try:
+                    s = session.task["stages"][str(stage_num)]
+                    history.append({"role": "assistant",
+                                    "content": _stage_card(stage_num, s)})
+                except KeyError:
+                    pass
+                current_stage_seen = stage_num
+
+            speaker = m.get("speaker", "")
+            content = m.get("content", "")
+            if speaker == "사용자":
+                history.append({"role": "user", "content": content})
+                continue
+
+            aid = m.get("agent_id")
+            if not aid:
+                for k, nm in AI_NAME_BY_ID.items():
+                    if nm == speaker:
+                        aid = k
+                        break
+            aid = aid or "ai_1"
+            history.extend(_bubble_messages(aid, AI_NAME_BY_ID.get(aid, speaker), content))
+        return history
+
     def _refresh_bundle(history, clear_msg=True):
-        """chatbot/msg + 6개 visualization output을 한 번에 묶어 반환.
-
-        on_submit 처럼 매 턴 전체 대시보드를 자동 갱신하기 위해 사용한다.
-        outputs 순서: [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
-        """
         return (
             history,
             "" if clear_msg else gr.update(),
@@ -112,36 +184,28 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             _decision_json(), _misconception_timeline(), _cps_heatmap(),
         )
 
+    def _chat_only(history, clear_msg=False):
+        return (
+            history,
+            "" if clear_msg else gr.update(),
+            gr.update(), gr.update(), gr.update(),
+            gr.update(), gr.update(), gr.update(),
+        )
+
     def on_submit(msg, history):
-        """제너레이터 기반 스트리밍 on_submit.
-
-        흐름:
-          1) 사용자 버블 즉시 표시 (yield)
-          2) '생각하는 중…' indicator 표시 (yield)
-          3) analyze + tutor_decision 실행 (두 번의 순차 LLM 호출)
-          4) indicator 제거 + speaking_agents를 병렬로 호출
-          5) 먼저 끝난 AI부터 순서대로 버블 추가 (yield마다 UI 갱신)
-          6) stage_complete면 전환 처리까지 포함
-
-        AI 발화 순서는 API 완료 순(= 말 짧게 하는 사람이 먼저)으로 자연스러운
-        인간 대화 리듬을 만든다.
-        """
         msg = (msg or "").strip()
         if not msg:
             yield _refresh_bundle(history)
             return
 
-        # 1) 사용자 버블 즉시 반영 + 입력창 클리어
         history = history + [{"role": "user", "content": msg}]
-        yield _refresh_bundle(history, clear_msg=True)
+        yield _chat_only(history, clear_msg=True)
 
-        # 2) '생각하는 중' indicator
         thinking_idx = len(history)
         history = history + [{"role": "assistant",
                               "content": _system_bubble("_학생들이 생각하는 중…_")}]
-        yield _refresh_bundle(history, clear_msg=False)
+        yield _chat_only(history, clear_msg=False)
 
-        # 3) analyze + tutor_decision (이 두 호출이 병목의 대부분)
         try:
             prep = session.user_turn_prep(msg)
         except Exception as e:
@@ -151,45 +215,72 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
         decision = prep["decision"]
 
-        # 4) indicator 제거, 사용자 모드가 teacher면 시스템 버블 하나 추가
         history = history[:thinking_idx]
         if prep["user_mode"] == "teacher":
             history.append({"role": "assistant",
                             "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")})
-        yield _refresh_bundle(history, clear_msg=False)
+        yield _chat_only(history, clear_msg=False)
 
-        # 5) 병렬 발화: 먼저 끝난 사람부터 버블이 나타난다 (자연스러운 대화 리듬)
-        for aid, text in session.stream_ai_turns(
+        slot = {}
+        buf = {}
+        done_payloads = {}
+        CURSOR = "▍"
+
+        for ev, aid, payload in session.stream_ai_turns_tokens(
             msg, decision,
             silence_trigger=decision.get("silence_trigger", False),
         ):
-            history.append({"role": "assistant",
-                            "content": _bubble(aid, AI_NAME_BY_ID[aid], text)})
-            yield _refresh_bundle(history, clear_msg=False)
+            if ev == "start":
+                buf[aid] = ""
+                slot[aid] = len(history)
+                history.append({"role": "assistant",
+                                "content": _bubble(aid, AI_NAME_BY_ID[aid], CURSOR)})
+                yield _chat_only(history, clear_msg=False)
+            elif ev == "update":
+                buf[aid] = buf.get(aid, "") + payload
+                history[slot[aid]] = {
+                    "role": "assistant",
+                    "content": _bubble(aid, AI_NAME_BY_ID[aid], buf[aid] + CURSOR),
+                }
+                yield _chat_only(history, clear_msg=False)
+            elif ev == "done":
+                done_payloads[aid] = payload
+                # 스트리밍 끝난 시점엔 일단 단일 버블로 고정 (분할은 뒤에서 일괄 처리).
+                history[slot[aid]] = {
+                    "role": "assistant",
+                    "content": _bubble(aid, AI_NAME_BY_ID[aid], payload),
+                }
+                yield _refresh_bundle(history, clear_msg=False)
 
-        # 6) stage 전환
+        # 모든 AI 스트리밍이 끝난 뒤 단락(\n\n) 단위로 버블 분할.
+        # slot 인덱스가 큰 것부터 처리해야 뒤쪽 insert가 앞쪽 slot 위치를 깨뜨리지 않는다.
+        for aid in sorted(slot.keys(), key=lambda a: slot[a], reverse=True):
+            text = done_payloads.get(aid, "")
+            msgs = _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
+            if len(msgs) <= 1:
+                continue
+            history[slot[aid]] = msgs[0]
+            for m in reversed(msgs[1:]):
+                history.insert(slot[aid] + 1, m)
+        if done_payloads:
+            yield _chat_only(history, clear_msg=False)
+
         if decision.get("stage_complete"):
             history.append({"role": "assistant",
                             "content": _system_bubble(f"Stage {session.current_stage} 완료")})
             if session.advance_stage():
                 s = session.current_stage_info()
                 history.append({"role": "assistant",
-                                "content": _system_bubble(f"**Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}")})
-                yield _refresh_bundle(history, clear_msg=False)
+                                "content": _stage_card(session.current_stage, s)})
+                yield _chat_only(history, clear_msg=False)
                 intro = session.stage_intro_utterance("ai_2")
-                history.append({"role": "assistant",
-                                "content": _bubble("ai_2", n2, intro)})
+                history.extend(_bubble_messages("ai_2", n2, intro))
             else:
                 history.append({"role": "assistant",
-                                "content": _system_bubble("모든 Stage 완료! 오른쪽 탭이 자동으로 최신 상태입니다.")})
+                                "content": _system_bubble("모든 Stage 완료. 오른쪽 탭이 자동으로 최신 상태입니다.")})
             yield _refresh_bundle(history, clear_msg=False)
 
     def on_silence_tick(history):
-        """1초마다 호출되는 침묵 감지 폴러.
-
-        사용자가 60초 이상 말하지 않으면 한 명의 AI가 대화를 유도한다.
-        AI 응답이 추가되면 새 history를, 아니면 기존 history를 그대로 반환.
-        """
         try:
             result = session.nudge_on_silence()
         except Exception as e:
@@ -200,11 +291,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             return history
         aid = result["agent_id"]
         text = result["text"]
-        # 침묵 감지 안내 문구 없이 일반 발화처럼 버블만 추가한다.
-        history = history + [{
-            "role": "assistant",
-            "content": _bubble(aid, AI_NAME_BY_ID[aid], text),
-        }]
+        history = history + _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
         return history
 
     def on_next_stage(history):
@@ -213,23 +300,19 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             intro = session.stage_intro_utterance("ai_2")
             history = history + [
                 {"role": "assistant",
-                 "content": _system_bubble(f"**Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}")},
-                {"role": "assistant",
-                 "content": _bubble("ai_2", n2, intro)},
-            ]
+                 "content": _stage_card(session.current_stage, s)},
+            ] + _bubble_messages("ai_2", n2, intro)
         else:
             history = history + [{"role": "assistant",
                                   "content": _system_bubble("모든 stage가 이미 완료되었습니다.")}]
         return history
 
-    # -------- Blocks 레이아웃 --------
     with gr.Blocks(title="협력학습 세션", theme=gr.themes.Soft()) as demo:
         gr.Markdown(f"# 🎓 {session.task['task_title']}")
         with gr.Row():
-            # ---- 왼쪽: 채팅 ----
             with gr.Column(scale=3):
                 chatbot = gr.Chatbot(
-                    value=_initial_history(),
+                    value=[],
                     type="messages",
                     height=560,
                     label="세션 대화",
@@ -245,33 +328,22 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     next_btn = gr.Button("▶ 다음 Stage")
                     refresh_all_btn = gr.Button("🔄 대시보드 전체 갱신")
 
-            # ---- 오른쪽: 대시보드 ----
-            # 탭 순서: ① 레이더 → ② 학습자 모델 → ③ 변화 추이
-            #         → ④ 교수자 디시젼 → ⑤ 오개념 타임라인 → ⑥ CPS 히트맵
             with gr.Column(scale=2):
                 with gr.Tabs():
                     with gr.Tab("① 🕸️ 레이더"):
-                        gr.Markdown(
-                            "_학습자 모델의 주요 요소를 방사형 그래프로 한눈에 조감합니다._"
-                        )
+                        gr.Markdown("_학습자 모델의 주요 요소를 방사형 그래프로 한눈에 조감합니다._")
                         radar = gr.Plot(label="사용자 레이더")
                         gr.Button("🔄 갱신").click(_radar, outputs=radar)
                     with gr.Tab("② 🧠 학습자 모델"):
-                        gr.Markdown(
-                            "_인지/정의 카테고리별 하위요소 점수와 루브릭 해석입니다._"
-                        )
+                        gr.Markdown("_인지/정의 카테고리별 하위요소 점수와 루브릭 해석입니다._")
                         model_md = gr.Markdown()
                         gr.Button("🔄 갱신").click(_model_md, outputs=model_md)
                     with gr.Tab("③ 📈 변화 추이"):
-                        gr.Markdown(
-                            "_업데이트 회차에 따른 각 하위요소의 변화 추이입니다._"
-                        )
+                        gr.Markdown("_업데이트 회차에 따른 각 하위요소의 변화 추이입니다._")
                         hist_plot = gr.Plot(label="사용자 단계별 변화")
                         gr.Button("🔄 갱신").click(_history, outputs=hist_plot)
                     with gr.Tab("④ 🧭 교수자 디시젼"):
-                        gr.Markdown(
-                            "_가장 최근 턴의 교수자 모델이 내린 의사결정(JSON)입니다._"
-                        )
+                        gr.Markdown("_가장 최근 턴의 교수자 모델이 내린 의사결정(JSON)입니다._")
                         dec_code = gr.Code(language="json", label="last_tutor_decision")
                         gr.Button("🔄 갱신").click(_decision_json, outputs=dec_code)
                     with gr.Tab("⑤ ⏱️ 오개념 타임라인"):
@@ -289,8 +361,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         cps_plot = gr.Plot(label="CPS 히트맵")
                         gr.Button("🔄 갱신").click(_cps_heatmap, outputs=cps_plot)
 
-        # 이벤트 와이어링
-        # on_submit은 턴마다 [chatbot, msg]와 6개 시각화를 한 번에 갱신한다.
         auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
         send.click(on_submit, [msg, chatbot], auto_outputs)
         msg.submit(on_submit, [msg, chatbot], auto_outputs)
@@ -303,14 +373,14 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             outputs=[radar, hist_plot, model_md, dec_code, misc_plot, cps_plot],
         )
 
-        # 침묵 유도 타이머: 15초 간격으로 침묵 여부 폴링 (실제 트리거는 60초 누적부터)
         silence_timer = gr.Timer(value=15.0, active=True)
         silence_timer.tick(on_silence_tick, inputs=chatbot, outputs=chatbot)
 
-        # 최초 로드 시 대시보드 초기화
+        demo.load(_rebuild_chat_from_session, outputs=chatbot)
         demo.load(_radar, outputs=radar)
         demo.load(_history, outputs=hist_plot)
         demo.load(_model_md, outputs=model_md)
+        demo.load(_decision_json, outputs=dec_code)
         demo.load(_misconception_timeline, outputs=misc_plot)
         demo.load(_cps_heatmap, outputs=cps_plot)
 

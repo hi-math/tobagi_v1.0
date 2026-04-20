@@ -17,21 +17,6 @@ def load_md(path):
 
 
 def load_config(base_path="team4", domain_folder="domain", max_domain_chars=8000):
-    """base_path/config, base_path/prompts, base_path/domain 에서 모든 설정·프롬프트·도메인 지식을 로드.
-
-    Args:
-        base_path: 프로젝트 루트 경로 (문자열 또는 Path)
-        domain_folder: 도메인 자료 서브폴더 이름
-        max_domain_chars: 도메인 문서당 최대 문자 수 (프롬프트 길이 제어)
-
-    Returns:
-        (CONFIG, PROMPTS) tuple
-            CONFIG  — personas, learner_model_schema, tutor_model, tasks, domain_knowledge
-            PROMPTS — 9개 프롬프트 템플릿 문자열
-                     (learner_analysis, tutor_decision, ai_student,
-                      stage_intro, stage_closure, misconception,
-                      encouragement, cps_tagging, self_efficacy)
-    """
     base = Path(base_path)
 
     config = {
@@ -47,15 +32,16 @@ def load_config(base_path="team4", domain_folder="domain", max_domain_chars=8000
     }
 
     prompts = {
-        "learner_analysis":  load_md(base / "prompts" / "01_learner_analysis.md"),
-        "tutor_decision":    load_md(base / "prompts" / "02_tutor_decision.md"),
-        "ai_student":        load_md(base / "prompts" / "03_ai_student_utterance.md"),
-        "stage_intro":       load_md(base / "prompts" / "04_stage_intro.md"),
-        "stage_closure":     load_md(base / "prompts" / "05_stage_closure.md"),
-        "misconception":     load_md(base / "prompts" / "06_misconception_challenge.md"),
-        "encouragement":     load_md(base / "prompts" / "07_encouragement.md"),
-        "cps_tagging":       load_md(base / "prompts" / "08_cps_tagging.md"),
-        "self_efficacy":     load_md(base / "prompts" / "09_self_efficacy_survey.md"),
+        "analyze_and_decide": load_md(base / "prompts" / "00_analyze_and_decide.md"),
+        "learner_analysis":   load_md(base / "prompts" / "01_learner_analysis.md"),
+        "tutor_decision":     load_md(base / "prompts" / "02_tutor_decision.md"),
+        "ai_student":         load_md(base / "prompts" / "03_ai_student_utterance.md"),
+        "stage_intro":        load_md(base / "prompts" / "04_stage_intro.md"),
+        "stage_closure":      load_md(base / "prompts" / "05_stage_closure.md"),
+        "misconception":      load_md(base / "prompts" / "06_misconception_challenge.md"),
+        "encouragement":      load_md(base / "prompts" / "07_encouragement.md"),
+        "cps_tagging":        load_md(base / "prompts" / "08_cps_tagging.md"),
+        "self_efficacy":      load_md(base / "prompts" / "09_self_efficacy_survey.md"),
     }
 
     return config, prompts
