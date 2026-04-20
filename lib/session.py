@@ -10,6 +10,7 @@
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from .llm_api import extract_json, render_prompt
 
 
@@ -337,13 +338,15 @@ class CollaborativeSession:
         })
         return self.api.call(prompt, max_tokens=400, temperature=0.9).strip()
 
-    # ----- 전체 턴 -----
-    def user_turn(self, user_utterance):
-        # 사용자 발화 시점 기록 (침묵 타이머 리셋)
+    # ----- 턴 준비: analyze + tutor_decision (AI 발화 전까지) -----
+    def user_turn_prep(self, user_utterance):
+        """사용자 발화를 받아서 학습자 분석 + 교수자 의사결정까지 수행.
+
+        AI 학생 발화는 생성하지 않는다. 발화는 stream_ai_turns()로 이어서
+        병렬·완료순으로 스트리밍한다.
+        """
         silence_before = self.seconds_since_user_spoke()
         self.last_user_utterance_ts = time.time()
-
-        # 사용자 모드 감지
         self.current_user_mode = detect_user_mode(user_utterance)
 
         self.conversation.append({
@@ -362,44 +365,86 @@ class CollaborativeSession:
             print(f"       · 관찰: {analysis['observation_summary']}")
 
         print("  [2/3] 🎓 교수자 모델 의사결정 중...")
-        # user_turn 시점에는 침묵 아님 (방금 발화) → silence=0
-        decision = self.tutor_decision(user_silence_seconds=0.0, user_mode=self.current_user_mode)
+        decision = self.tutor_decision(user_silence_seconds=0.0,
+                                       user_mode=self.current_user_mode)
         print(f"       · 전략: {decision.get('strategy', '')}")
         print(f"       · speaking_agents: {decision.get('speaking_agents', [])}")
-
-        print("  [3/3] 💬 AI 학생 발화 생성 중...")
-        ai_students = self.config["personas"]["ai_students"]
-        outputs = {}
-        speaking = decision.get("speaking_agents", []) or []
-        for aid in self.AI_KEYS:
-            if aid not in speaking:
-                outputs[aid] = None
-                continue
-            directive = decision.get(f"{aid}_directive")
-            if not directive:
-                outputs[aid] = None
-                continue
-            text = self.generate_ai_utterance(
-                aid, directive, user_utterance,
-                user_mode=self.current_user_mode,
-                silence_trigger=decision.get("silence_trigger", False),
-                user_silence_seconds=0.0,
-            )
-            self.conversation.append({
-                "speaker": ai_students[aid]["name"],
-                "content": text,
-                "stage": self.current_stage,
-                "agent_id": aid,
-            })
-            outputs[aid] = text
 
         return {
             "analysis": analysis,
             "decision": decision,
             "user_mode": self.current_user_mode,
-            "ai_1": outputs.get("ai_1"),
-            "ai_2": outputs.get("ai_2"),
-            "ai_3": outputs.get("ai_3"),
+        }
+
+    # ----- 병렬·완료순 AI 발화 스트리밍 -----
+    def stream_ai_turns(self, user_utterance, decision, silence_trigger=False,
+                        user_silence_seconds=0.0):
+        """발화해야 하는 AI들의 API 호출을 병렬로 쏘고, 완료 순서대로 yield.
+
+        "말할 내용이 먼저 생긴 사람부터 말한다"는 자연스러운 대화 리듬을 구현한다.
+        짧게 말하는 AI(예: 질문자 연우)가 보통 먼저 끝나고 먼저 발화한다.
+
+        Yields:
+            (agent_id, text): API가 완료된 순서대로
+        """
+        ai_students = self.config["personas"]["ai_students"]
+        speaking = decision.get("speaking_agents", []) or []
+
+        # 발화 대상 수집 (directive 없는 agent는 건너뜀)
+        targets = [
+            aid for aid in self.AI_KEYS
+            if aid in speaking and decision.get(f"{aid}_directive")
+        ]
+        if not targets:
+            return
+
+        print(f"  [3/3] 💬 {len(targets)}명 병렬 발화 생성 (완료순 스트리밍)...")
+
+        def _call(aid):
+            directive = decision.get(f"{aid}_directive")
+            try:
+                text = self.generate_ai_utterance(
+                    aid, directive, user_utterance,
+                    user_mode=self.current_user_mode,
+                    silence_trigger=silence_trigger,
+                    user_silence_seconds=user_silence_seconds,
+                )
+            except Exception as e:
+                text = f"(발화 생성 실패: {e})"
+            return aid, text
+
+        # max_workers = 발화자 수 (1~3). 같은 ClaudeAPI 인스턴스를 공유해도 SDK는 thread-safe.
+        with ThreadPoolExecutor(max_workers=max(1, len(targets))) as ex:
+            futures = {ex.submit(_call, aid): aid for aid in targets}
+            for fut in as_completed(futures):
+                aid, text = fut.result()
+                self.conversation.append({
+                    "speaker": ai_students[aid]["name"],
+                    "content": text,
+                    "stage": self.current_stage,
+                    "agent_id": aid,
+                })
+                yield aid, text
+
+    # ----- 전체 턴 (기존 API 호환) -----
+    def user_turn(self, user_utterance):
+        """CLI 런너 등 기존 호출부 호환용: prep + stream을 한 번에 수행.
+
+        스트리밍이 필요한 UI에서는 user_turn_prep + stream_ai_turns를 직접 쓰라.
+        """
+        prep = self.user_turn_prep(user_utterance)
+        decision = prep["decision"]
+        outputs = {"ai_1": None, "ai_2": None, "ai_3": None}
+        for aid, text in self.stream_ai_turns(
+            user_utterance, decision,
+            silence_trigger=decision.get("silence_trigger", False),
+        ):
+            outputs[aid] = text
+        return {
+            "analysis": prep["analysis"],
+            "decision": decision,
+            "user_mode": prep["user_mode"],
+            **outputs,
         }
 
     # ----- 침묵 유도 턴 (사용자가 60초 이상 말하지 않을 때 호출) -----

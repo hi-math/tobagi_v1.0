@@ -1,6 +1,6 @@
 """Gradio 채팅 인터페이스.
 
-왼쪽 패널: Chatbot + 입력 / 오른쪽 탭: 레이더 · 변화 추이 · 학습자모델 · 교수자 Decision
+왼쪽 패널: Chatbot(발화자별 컬러 버블) + 입력 / 오른쪽 탭: 레이더 · 변화 추이 · 학습자모델 · 교수자 Decision
 
 * gradio 는 launch_ui() 실행 시점에 지연 임포트한다. 덕분에 gradio 미설치
   환경에서도 team4 패키지 전체는 정상 임포트된다 (CLI 런너나 config 로더만
@@ -34,6 +34,39 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
     n3 = config["personas"]["ai_students"]["ai_3"]["name"]
     AI_NAME_BY_ID = {"ai_1": n1, "ai_2": n2, "ai_3": n3}
 
+    # -------- 발화자별 버블 스타일 --------
+    # 각 AI와 시스템 메시지에 고유 색상 테두리/배경을 준다.
+    # 🧑‍🎓 아이콘은 사용하지 않고, 좌측 컬러바가 발화자를 구분한다.
+    BUBBLE_STYLES = {
+        "ai_1":   {"border": "#2563eb", "bg": "#eff6ff"},  # 민준 — 파랑
+        "ai_2":   {"border": "#db2777", "bg": "#fdf2f8"},  # 서연 — 분홍
+        "ai_3":   {"border": "#16a34a", "bg": "#f0fdf4"},  # 연우 — 초록
+        "system": {"border": "#6b7280", "bg": "#f9fafb"},  # 시스템 — 회색
+    }
+
+    def _bubble(speaker_id: str, name: str, text: str) -> str:
+        """발화자별 색상 버블 HTML (markdown 호환).
+
+        블록 내부 공백 라인을 넣어 안쪽 텍스트가 markdown으로 계속 렌더되게 한다.
+        """
+        s = BUBBLE_STYLES.get(speaker_id, BUBBLE_STYLES["system"])
+        return (
+            f'<div style="border-left:4px solid {s["border"]};'
+            f' background:{s["bg"]}; padding:8px 12px; border-radius:6px;">\n\n'
+            f'<span style="color:{s["border"]}; font-weight:700;">{name}</span>\n\n'
+            f'{text}\n\n'
+            f'</div>'
+        )
+
+    def _system_bubble(text: str) -> str:
+        return (
+            f'<div style="border-left:4px solid {BUBBLE_STYLES["system"]["border"]};'
+            f' background:{BUBBLE_STYLES["system"]["bg"]};'
+            f' padding:8px 12px; border-radius:6px; font-size:0.95em;">\n\n'
+            f'{text}\n\n'
+            f'</div>'
+        )
+
     # -------- 시각화 래퍼 (현재 session 이 참조하는 learner_models 사용) --------
     def _radar():
         return radar_figure(config, learner_models)
@@ -60,9 +93,9 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         intro = session.stage_intro_utterance("ai_1")
         return [
             {"role": "assistant",
-             "content": f"📝 **Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}"},
+             "content": _system_bubble(f"**Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}")},
             {"role": "assistant",
-             "content": f"🧑‍🎓 **{n1}**  \n{intro}"},
+             "content": _bubble("ai_1", n1, intro)},
         ]
 
     # -------- 이벤트 콜백 --------
@@ -80,41 +113,76 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         )
 
     def on_submit(msg, history):
+        """제너레이터 기반 스트리밍 on_submit.
+
+        흐름:
+          1) 사용자 버블 즉시 표시 (yield)
+          2) '생각하는 중…' indicator 표시 (yield)
+          3) analyze + tutor_decision 실행 (두 번의 순차 LLM 호출)
+          4) indicator 제거 + speaking_agents를 병렬로 호출
+          5) 먼저 끝난 AI부터 순서대로 버블 추가 (yield마다 UI 갱신)
+          6) stage_complete면 전환 처리까지 포함
+
+        AI 발화 순서는 API 완료 순(= 말 짧게 하는 사람이 먼저)으로 자연스러운
+        인간 대화 리듬을 만든다.
+        """
         msg = (msg or "").strip()
         if not msg:
-            return _refresh_bundle(history)
+            yield _refresh_bundle(history)
+            return
+
+        # 1) 사용자 버블 즉시 반영 + 입력창 클리어
         history = history + [{"role": "user", "content": msg}]
+        yield _refresh_bundle(history, clear_msg=True)
+
+        # 2) '생각하는 중' indicator
+        thinking_idx = len(history)
+        history = history + [{"role": "assistant",
+                              "content": _system_bubble("_학생들이 생각하는 중…_")}]
+        yield _refresh_bundle(history, clear_msg=False)
+
+        # 3) analyze + tutor_decision (이 두 호출이 병목의 대부분)
         try:
-            result = session.user_turn(msg)
+            prep = session.user_turn_prep(msg)
         except Exception as e:
-            history.append({"role": "assistant", "content": f"⚠️ 오류: {e}"})
-            return _refresh_bundle(history)
+            history[thinking_idx] = {"role": "assistant", "content": f"⚠️ 오류: {e}"}
+            yield _refresh_bundle(history, clear_msg=False)
+            return
 
-        if result.get("user_mode") == "teacher":
+        decision = prep["decision"]
+
+        # 4) indicator 제거, 사용자 모드가 teacher면 시스템 버블 하나 추가
+        history = history[:thinking_idx]
+        if prep["user_mode"] == "teacher":
             history.append({"role": "assistant",
-                            "content": "🎓 _사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._"})
+                            "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")})
+        yield _refresh_bundle(history, clear_msg=False)
 
-        # 발화한 AI만 출력 (speaking_agents 기반)
-        for aid in ("ai_1", "ai_2", "ai_3"):
-            text = result.get(aid)
-            if text:
-                history.append({"role": "assistant",
-                                "content": f"🧑‍🎓 **{AI_NAME_BY_ID[aid]}**  \n{text}"})
-
-        if result["decision"].get("stage_complete"):
+        # 5) 병렬 발화: 먼저 끝난 사람부터 버블이 나타난다 (자연스러운 대화 리듬)
+        for aid, text in session.stream_ai_turns(
+            msg, decision,
+            silence_trigger=decision.get("silence_trigger", False),
+        ):
             history.append({"role": "assistant",
-                            "content": f"✅ Stage {session.current_stage} 완료 신호"})
+                            "content": _bubble(aid, AI_NAME_BY_ID[aid], text)})
+            yield _refresh_bundle(history, clear_msg=False)
+
+        # 6) stage 전환
+        if decision.get("stage_complete"):
+            history.append({"role": "assistant",
+                            "content": _system_bubble(f"Stage {session.current_stage} 완료")})
             if session.advance_stage():
                 s = session.current_stage_info()
                 history.append({"role": "assistant",
-                                "content": f"▶ **Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}"})
+                                "content": _system_bubble(f"**Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}")})
+                yield _refresh_bundle(history, clear_msg=False)
                 intro = session.stage_intro_utterance("ai_2")
                 history.append({"role": "assistant",
-                                "content": f"🧑‍🎓 **{n2}**  \n{intro}"})
+                                "content": _bubble("ai_2", n2, intro)})
             else:
                 history.append({"role": "assistant",
-                                "content": "🎉 모든 Stage 완료\! 오른쪽 탭이 자동으로 최신 상태입니다."})
-        return _refresh_bundle(history)
+                                "content": _system_bubble("모든 Stage 완료! 오른쪽 탭이 자동으로 최신 상태입니다.")})
+            yield _refresh_bundle(history, clear_msg=False)
 
     def on_silence_tick(history):
         """1초마다 호출되는 침묵 감지 폴러.
@@ -126,15 +194,16 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             result = session.nudge_on_silence()
         except Exception as e:
             history = history + [{"role": "assistant",
-                                   "content": f"⚠️ 침묵 유도 중 오류: {e}"}]
+                                   "content": _system_bubble(f"침묵 유도 중 오류: {e}")}]
             return history
         if not result:
             return history
         aid = result["agent_id"]
         text = result["text"]
+        # 침묵 감지 안내 문구 없이 일반 발화처럼 버블만 추가한다.
         history = history + [{
             "role": "assistant",
-            "content": f"🕰️ _{int(session.seconds_since_user_spoke())}초 침묵 감지 — {AI_NAME_BY_ID[aid]}이(가) 먼저 말합니다._\n\n🧑‍🎓 **{AI_NAME_BY_ID[aid]}**  \n{text}",
+            "content": _bubble(aid, AI_NAME_BY_ID[aid], text),
         }]
         return history
 
@@ -144,13 +213,13 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             intro = session.stage_intro_utterance("ai_2")
             history = history + [
                 {"role": "assistant",
-                 "content": f"▶ **Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}"},
+                 "content": _system_bubble(f"**Stage {session.current_stage}: {s['title']}**\n\n{s['prompt']}")},
                 {"role": "assistant",
-                 "content": f"🧑‍🎓 **{n2}**  \n{intro}"},
+                 "content": _bubble("ai_2", n2, intro)},
             ]
         else:
             history = history + [{"role": "assistant",
-                                  "content": "모든 stage가 이미 완료되었습니다."}]
+                                  "content": _system_bubble("모든 stage가 이미 완료되었습니다.")}]
         return history
 
     # -------- Blocks 레이아웃 --------
