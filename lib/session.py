@@ -99,11 +99,25 @@ class CollaborativeSession:
         return text if text else "(도메인 자료가 로드되지 않음)"
 
     def _flatten_lm(self, lm):
-        """시각화·프롬프트용으로 학습자 모델 값만 평탄화."""
-        return {
-            mk: {dk: dv["value"] for dk, dv in mv.items()}
-            for mk, mv in lm["models"].items()
-        }
+        """시각화·프롬프트용으로 학습자 모델 값만 평탄화.
+
+        주의: self_efficacy 항목은 {pre, post, history} 구조라 'value' 키가 없다.
+              → item별로 {"pre": v, "post": v}만 요약해 리턴한다.
+        다른 모델(ordinal/counter/list/stage_categorical)은 dv["value"]를 사용.
+        """
+        out = {}
+        for mk, mv in lm["models"].items():
+            per_dim = {}
+            for dk, dv in mv.items():
+                if isinstance(dv, dict) and "value" in dv:
+                    per_dim[dk] = dv["value"]
+                elif isinstance(dv, dict) and ("pre" in dv or "post" in dv):
+                    # self_efficacy 항목: pre/post만 노출 (history는 제외)
+                    per_dim[dk] = {"pre": dv.get("pre"), "post": dv.get("post")}
+                else:
+                    per_dim[dk] = None
+            out[mk] = per_dim
+        return out
 
     # ----- 1단계: 학습자 분석 -----
     def analyze_user_utterance(self, user_utterance):

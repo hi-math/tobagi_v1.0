@@ -66,16 +66,29 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         ]
 
     # -------- 이벤트 콜백 --------
+    def _refresh_bundle(history, clear_msg=True):
+        """chatbot/msg + 6개 visualization output을 한 번에 묶어 반환.
+
+        on_submit 처럼 매 턴 전체 대시보드를 자동 갱신하기 위해 사용한다.
+        outputs 순서: [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
+        """
+        return (
+            history,
+            "" if clear_msg else gr.update(),
+            _radar(), _history(), _model_md(),
+            _decision_json(), _misconception_timeline(), _cps_heatmap(),
+        )
+
     def on_submit(msg, history):
         msg = (msg or "").strip()
         if not msg:
-            return history, ""
+            return _refresh_bundle(history)
         history = history + [{"role": "user", "content": msg}]
         try:
             result = session.user_turn(msg)
         except Exception as e:
             history.append({"role": "assistant", "content": f"⚠️ 오류: {e}"})
-            return history, ""
+            return _refresh_bundle(history)
 
         if result.get("user_mode") == "teacher":
             history.append({"role": "assistant",
@@ -100,8 +113,8 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                                 "content": f"🧑‍🎓 **{n2}**  \n{intro}"})
             else:
                 history.append({"role": "assistant",
-                                "content": "🎉 모든 Stage 완료! 오른쪽 탭의 🔄 갱신으로 최종 모델을 확인해 보세요."})
-        return history, ""
+                                "content": "🎉 모든 Stage 완료\! 오른쪽 탭이 자동으로 최신 상태입니다."})
+        return _refresh_bundle(history)
 
     def on_silence_tick(history):
         """1초마다 호출되는 침묵 감지 폴러.
@@ -208,8 +221,10 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         gr.Button("🔄 갱신").click(_cps_heatmap, outputs=cps_plot)
 
         # 이벤트 와이어링
-        send.click(on_submit, [msg, chatbot], [chatbot, msg])
-        msg.submit(on_submit, [msg, chatbot], [chatbot, msg])
+        # on_submit은 턴마다 [chatbot, msg]와 6개 시각화를 한 번에 갱신한다.
+        auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
+        send.click(on_submit, [msg, chatbot], auto_outputs)
+        msg.submit(on_submit, [msg, chatbot], auto_outputs)
         next_btn.click(on_next_stage, chatbot, chatbot)
         refresh_all_btn.click(
             lambda: (
