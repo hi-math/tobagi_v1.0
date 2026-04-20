@@ -30,6 +30,7 @@ def run_session(*, config, prompts, learner_models, api):
 
     n1 = config["personas"]["ai_students"]["ai_1"]["name"]
     n2 = config["personas"]["ai_students"]["ai_2"]["name"]
+    n3 = config["personas"]["ai_students"]["ai_3"]["name"]
 
     # Stage 1 intro
     stage = session.current_stage_info()
@@ -75,8 +76,14 @@ def run_session(*, config, prompts, learner_models, api):
                 print("  알 수 없는 명령어"); continue
 
         result = session.user_turn(user_input)
-        print(f"\n🧑‍🎓 {n1}: {result['ai_1']}")
-        print(f"🧑‍🎓 {n2}: {result['ai_2']}")
+        if result.get("user_mode") == "teacher":
+            print("   [mode] 사용자가 설명자(teacher) 모드로 감지됨 — AI는 학습자 모드로 반응")
+        if result.get("ai_1"):
+            print(f"\n🧑‍🎓 {n1}: {result['ai_1']}")
+        if result.get("ai_2"):
+            print(f"🧑‍🎓 {n2}: {result['ai_2']}")
+        if result.get("ai_3"):
+            print(f"🧑‍🎓 {n3}: {result['ai_3']}")
 
         # stage 자동 전환
         if result["decision"].get("stage_complete"):

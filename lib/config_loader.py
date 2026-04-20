@@ -1,7 +1,9 @@
-"""config/ 및 prompts/ 하위의 JSON·MD 파일을 읽어 CONFIG, PROMPTS dict 반환."""
+"""config/, prompts/, domain/ 하위의 JSON·MD·PDF 파일을 읽어 CONFIG, PROMPTS dict 반환."""
 
 import json
 from pathlib import Path
+
+from .domain_loader import load_domain_knowledge
 
 
 def load_json(path):
@@ -14,16 +16,21 @@ def load_md(path):
         return f.read()
 
 
-def load_config(base_path="team4"):
-    """base_path/config, base_path/prompts 에서 모든 설정과 프롬프트를 로드.
+def load_config(base_path="team4", domain_folder="domain", max_domain_chars=8000):
+    """base_path/config, base_path/prompts, base_path/domain 에서 모든 설정·프롬프트·도메인 지식을 로드.
 
     Args:
-        base_path: team4 루트 경로 (문자열 또는 Path)
+        base_path: 프로젝트 루트 경로 (문자열 또는 Path)
+        domain_folder: 도메인 자료 서브폴더 이름
+        max_domain_chars: 도메인 문서당 최대 문자 수 (프롬프트 길이 제어)
 
     Returns:
         (CONFIG, PROMPTS) tuple
-            CONFIG  — personas, learner_model_schema, tutor_model, tasks
-            PROMPTS — 7개 프롬프트 템플릿 문자열
+            CONFIG  — personas, learner_model_schema, tutor_model, tasks, domain_knowledge
+            PROMPTS — 9개 프롬프트 템플릿 문자열
+                     (learner_analysis, tutor_decision, ai_student,
+                      stage_intro, stage_closure, misconception,
+                      encouragement, cps_tagging, self_efficacy)
     """
     base = Path(base_path)
 
@@ -32,6 +39,11 @@ def load_config(base_path="team4"):
         "learner_model_schema":  load_json(base / "config" / "learner_model.json"),
         "tutor_model":           load_json(base / "config" / "tutor_model.json"),
         "tasks":                 load_json(base / "config" / "tasks.json"),
+        "domain_knowledge":      load_domain_knowledge(
+            base_path=base,
+            folder=domain_folder,
+            max_chars_per_doc=max_domain_chars,
+        ),
     }
 
     prompts = {
@@ -42,6 +54,8 @@ def load_config(base_path="team4"):
         "stage_closure":     load_md(base / "prompts" / "05_stage_closure.md"),
         "misconception":     load_md(base / "prompts" / "06_misconception_challenge.md"),
         "encouragement":     load_md(base / "prompts" / "07_encouragement.md"),
+        "cps_tagging":       load_md(base / "prompts" / "08_cps_tagging.md"),
+        "self_efficacy":     load_md(base / "prompts" / "09_self_efficacy_survey.md"),
     }
 
     return config, prompts

@@ -1,43 +1,53 @@
 {
-  "schema_version": "1.0",
-  "description": "협력학습 상황에서 각 학생의 상태를 나타내는 학습자 모델. 사용자 발화를 분석하는 LLM이 이 모델을 업데이트한다.",
+  "schema_version": "2.0.0",
+  "description": "협력학습 상황에서 각 학생의 상태를 나타내는 학습자 모델 v2.0. 인지/정의 2개 범주로 구조화되며, 인지는 과제수행도달·수학적 의사소통·수학적 추론 3개 모델, 정의는 협력적 문제해결(CPS)·수학 자기효능감 2개 모델로 구성된다. extension_slot은 추후 추가될 정의적 요소(+α)를 위한 예비 슬롯이다.",
+  "versioning": {
+    "previous_version": "1.0",
+    "changes": [
+      "v1.0의 cognitive_state(conceptual_understanding, procedural_fluency, misconceptions)를 task_achievement(stage별 A~E 루브릭) + misconceptions 구조로 통합",
+      "v1.0의 math_communication에서 reasoning_quality를 분리하여 독립 모델 math_reasoning으로 승격",
+      "v1.0의 emotional_state를 extension_slot(+α)로 이동(추후 복귀 가능)",
+      "v1.0의 collaboration(contribution/responsiveness/help_seeking_giving)을 PISA 2015 CPS 프레임워크 기반 cps 모델로 재설계",
+      "self_efficacy 모델 신설 (Bandura 2006 과제-특이적 척도)"
+    ]
+  },
+  "categories": {
+    "cognitive": {
+      "name": "인지적 요소",
+      "models": ["task_achievement", "math_communication", "math_reasoning"]
+    },
+    "affective": {
+      "name": "정의적 요소",
+      "models": ["cps", "self_efficacy"]
+    }
+  },
   "models": {
-    "cognitive_state": {
-      "name": "인지 상태",
-      "name_en": "Cognitive State",
-      "description": "학습자가 현재 수학 개념을 얼마나 이해하고 있는지, 어떤 오개념을 가지고 있는지를 나타냄",
+    "task_achievement": {
+      "category": "cognitive",
+      "name": "과제 수행도달",
+      "name_en": "Task Achievement",
+      "description": "각 Stage의 성취수준 루브릭(A~E) 기준 현재 도달 레벨. Stage마다 독립적으로 기록되며, 관찰된 오개념 리스트를 함께 관리한다.",
+      "measurement_method": "llm_rubric_judgment",
+      "measurement_note": "매 발화마다 01_learner_analysis.md 프롬프트로 Claude가 현재 Stage의 assessment_rubric(A~E)에 비추어 stage_level을 추정.",
       "dimensions": {
-        "conceptual_understanding": {
-          "name": "개념 이해도",
-          "description": "소수·합성수·약수 등 핵심 개념의 이해 수준",
-          "type": "ordinal",
-          "scale": [1, 5],
-          "rubric": {
-            "1": "개념이 형성되지 않음 (예: 소수와 합성수를 구분하지 못함)",
-            "2": "단편적으로 이해함 (용어는 알지만 정의를 잘못 적용)",
-            "3": "기본 정의를 이해함 (약수의 개수로 판별 가능)",
-            "4": "심화된 이해 (경계 사례인 1과 2를 정확히 다룸)",
-            "5": "전이 가능한 이해 (다른 맥락의 수에도 개념을 적용)"
-          },
-          "default": 3
-        },
-        "procedural_fluency": {
-          "name": "절차적 유창성",
-          "description": "약수를 구하거나 소수를 판별하는 절차를 정확히 수행하는 능력",
-          "type": "ordinal",
-          "scale": [1, 5],
-          "rubric": {
-            "1": "절차를 모름",
-            "2": "일부 절차만 수행 가능",
-            "3": "기본 절차를 정확히 수행",
-            "4": "유창하게 수행하며 약간의 변형도 가능",
-            "5": "다양한 전략을 유연하게 적용"
-          },
-          "default": 3
+        "stage_level": {
+          "name": "Stage별 성취수준",
+          "description": "현재 Stage의 assessment_rubric에 따라 판단한 성취등급",
+          "type": "stage_categorical",
+          "scale": ["A", "B", "C", "D", "E"],
+          "per_stage_tracking": true,
+          "default": null,
+          "generic_rubric": {
+            "A": "Stage 루브릭의 모든 핵심 요소를 충족하고 정교하게 설명함",
+            "B": "핵심 요소를 대부분 충족하며 자발적 근거 제시가 있음",
+            "C": "기본 요소를 충족하나 일부 개념/절차에서 보조가 필요",
+            "D": "단편적 이해에 머물며 핵심 요소 중 일부를 놓침",
+            "E": "개념이 형성되지 않았거나 오개념이 지배적"
+          }
         },
         "misconceptions": {
-          "name": "오개념",
-          "description": "관찰된 수학적 오개념들의 리스트",
+          "name": "관찰된 오개념",
+          "description": "현재까지 발화에서 관찰된 수학적 오개념 리스트. 해소된 경우 제거.",
           "type": "list",
           "default": [],
           "common_misconceptions_for_task": [
@@ -50,9 +60,11 @@
       }
     },
     "math_communication": {
-      "name": "수학적 의사소통 능력",
+      "category": "cognitive",
+      "name": "수학적 의사소통",
       "name_en": "Mathematical Communication",
-      "description": "수학적 아이디어를 언어·기호로 표현하고 논증하는 능력",
+      "description": "수학적 아이디어를 언어·기호로 명확하게 표현하고 수학 용어를 적절히 사용하는 능력. (근거 제시·정당화는 math_reasoning으로 분리)",
+      "measurement_method": "llm_rubric_judgment",
       "dimensions": {
         "expression_clarity": {
           "name": "표현 명확성",
@@ -64,27 +76,13 @@
             "2": "단편적으로 표현",
             "3": "이해 가능한 수준으로 표현",
             "4": "명확하고 조직적으로 표현",
-            "5": "정교하고 청중을 고려하여 표현"
-          },
-          "default": 3
-        },
-        "reasoning_quality": {
-          "name": "논증의 수준",
-          "description": "주장에 대한 근거 제시 및 정당화",
-          "type": "ordinal",
-          "scale": [1, 5],
-          "rubric": {
-            "1": "근거 없음",
-            "2": "직관적·경험적 근거",
-            "3": "부분적 논리 근거",
-            "4": "완전한 논리적 논증",
-            "5": "일반화 및 반례 검토까지 수행"
+            "5": "정교하고 청중(동료)을 고려하여 표현"
           },
           "default": 3
         },
         "math_vocabulary_use": {
           "name": "수학 용어 사용",
-          "description": "'약수', '소수', '합성수' 등 수학 용어를 적절히 사용하는 정도",
+          "description": "'약수', '소수', '합성수', '배수' 등 수학 용어를 적절히 사용하는 정도",
           "type": "ordinal",
           "scale": [1, 5],
           "rubric": {
@@ -98,76 +96,228 @@
         }
       }
     },
-    "emotional_state": {
-      "name": "감정 상태",
-      "name_en": "Emotional State",
-      "description": "학습 과정에서의 정서적 상태",
+    "math_reasoning": {
+      "category": "cognitive",
+      "name": "수학적 추론",
+      "name_en": "Mathematical Reasoning",
+      "description": "주장에 대한 근거를 제시하고 일반화·반례 검토·검증을 수행하는 능력.",
+      "measurement_method": "llm_rubric_judgment",
       "dimensions": {
-        "engagement": {
-          "name": "몰입도",
+        "justification_quality": {
+          "name": "근거·정당화 수준",
+          "description": "주장에 대해 근거를 제시하고 정당화하는 질",
           "type": "ordinal",
           "scale": [1, 5],
           "rubric": {
-            "1": "무관심", "2": "소극적", "3": "보통", "4": "적극적", "5": "완전 몰입"
+            "1": "근거 없음",
+            "2": "직관적·경험적 근거",
+            "3": "부분적 논리 근거",
+            "4": "완전한 논리적 논증",
+            "5": "일반화 및 조건 한정까지 수행"
           },
           "default": 3
         },
-        "confidence": {
-          "name": "자신감",
+        "counterexample_handling": {
+          "name": "반례 활용",
+          "description": "주장을 반증하기 위해 반례를 제시·검토하거나, 동료의 반례에 반응하는 수준",
           "type": "ordinal",
           "scale": [1, 5],
           "rubric": {
-            "1": "매우 불안", "2": "불안", "3": "보통", "4": "자신감", "5": "매우 높음"
+            "1": "반례 개념 없음",
+            "2": "반례를 보여줘도 의미를 이해하지 못함",
+            "3": "제시된 반례의 의미를 이해함",
+            "4": "스스로 반례를 떠올려 주장을 수정함",
+            "5": "반례를 통해 주장의 조건/예외를 일반화함"
           },
           "default": 3
         },
-        "frustration": {
-          "name": "좌절감",
+        "generalization": {
+          "name": "일반화·전이",
+          "description": "특정 사례에서 규칙을 추출하거나 다른 사례에 전이하는 수준",
           "type": "ordinal",
           "scale": [1, 5],
           "rubric": {
-            "1": "없음", "2": "약간", "3": "보통", "4": "높음", "5": "매우 높음"
+            "1": "사례 암기 수준",
+            "2": "부분적 패턴 인식",
+            "3": "제한된 범위에서 규칙 서술",
+            "4": "규칙을 다른 사례에 적용",
+            "5": "규칙의 성립 조건까지 설명"
           },
-          "default": 2
+          "default": 3
+        }
+      }
+    },
+    "cps": {
+      "category": "affective",
+      "name": "협력적 문제해결 역량",
+      "name_en": "Collaborative Problem Solving",
+      "description": "둘 이상의 행위자가 문제 해결에 필요한 이해·지식·노력을 공유하고 해결에 도달하는 과정에 효과적으로 참여하는 능력. PISA 2015 CPS 프레임워크(OECD, 2017a)의 3개 협력 차원(shared understanding / appropriate action / team organisation)에 문제해결 과정에서 파생되는 repair moves를 추가하여 4개 하위구인으로 조작화한다.",
+      "measurement_method": "claude_api_tagging",
+      "measurement_note": "자기보고 태도 설문이 아닌 대화 로그 기반. 매 발화를 Claude로 다중 태깅(prompts/08_cps_tagging.md)하고, 각 하위구인의 누적 카운트를 학습자 모델에 기록한다. 단순 정답 여부가 아니라 '어떻게 공동 이해를 만들고, 조율하고, 수정해 갔는가'를 본다.",
+      "references": [
+        "OECD (2017a). PISA 2015 assessment and analytical framework. OECD Publishing.",
+        "OECD (2017b). PISA 2015 results (Volume V): Collaborative problem solving. OECD Publishing."
+      ],
+      "dimensions": {
+        "shared_understanding": {
+          "name": "공동 이해 형성·유지",
+          "name_en": "Establishing and maintaining shared understanding",
+          "description": "타인의 이해를 반영하고 기준을 합의하며 문제를 다시 정의하는 행동",
+          "type": "counter",
+          "default": 0,
+          "evidence_features": [
+            "친구 발화 재진술",
+            "기준 합의",
+            "문제 재정의"
+          ],
+          "derived_level_thresholds": {
+            "1": "0",
+            "2": "1-2",
+            "3": "3-4",
+            "4": "5-7",
+            "5": "8+"
+          }
+        },
+        "action_taking": {
+          "name": "적절한 행동 수행",
+          "name_en": "Taking appropriate action",
+          "description": "전략·예시·반례를 제안하거나 검증을 요청하는 행동",
+          "type": "counter",
+          "default": 0,
+          "evidence_features": [
+            "전략 제안",
+            "예시 제시",
+            "반례 제시/검증 요청"
+          ],
+          "derived_level_thresholds": {
+            "1": "0",
+            "2": "1-2",
+            "3": "3-4",
+            "4": "5-7",
+            "5": "8+"
+          }
+        },
+        "team_organisation": {
+          "name": "팀 조직화",
+          "name_en": "Establishing and maintaining team organisation",
+          "description": "역할을 제안하거나 순서를 조정하는 조율 발화",
+          "type": "counter",
+          "default": 0,
+          "evidence_features": [
+            "역할 제안",
+            "순서 조정",
+            "\"먼저 이거 해보자\" 같은 조율 발화"
+          ],
+          "derived_level_thresholds": {
+            "1": "0",
+            "2": "1",
+            "3": "2-3",
+            "4": "4-5",
+            "5": "6+"
+          }
+        },
+        "repair_moves": {
+          "name": "오해 정정·재조정",
+          "name_en": "Repair moves",
+          "description": "오해를 정정하고 기준을 재합의하며 틀린 추론을 협력적으로 수정하는 행동(문제해결 과정에서 파생)",
+          "type": "counter",
+          "default": 0,
+          "evidence_features": [
+            "오해 정정",
+            "기준 재합의",
+            "틀린 추론의 협력적 수정"
+          ],
+          "derived_level_thresholds": {
+            "1": "0",
+            "2": "1",
+            "3": "2-3",
+            "4": "4-5",
+            "5": "6+"
+          }
         }
       }
     },
-    "collaboration": {
-      "name": "협력 역량",
-      "name_en": "Collaboration Competency",
-      "description": "그룹 내에서 협력하여 문제를 해결하는 능력",
-      "dimensions": {
-        "contribution": {
-          "name": "기여도",
-          "description": "토론과 문제 해결에 능동적으로 기여하는 정도",
-          "type": "ordinal",
-          "scale": [1, 5],
-          "rubric": {
-            "1": "무참여", "2": "최소 참여", "3": "보통 기여", "4": "적극 기여", "5": "주도적 기여"
-          },
-          "default": 3
-        },
-        "responsiveness": {
-          "name": "반응성",
-          "description": "동료 의견을 경청하고 반응하는 능력",
-          "type": "ordinal",
-          "scale": [1, 5],
-          "rubric": {
-            "1": "무반응", "2": "소극적", "3": "기본 반응", "4": "적극적", "5": "건설적 확장"
-          },
-          "default": 3
-        },
-        "help_seeking_giving": {
-          "name": "도움 주고받기",
-          "description": "필요시 도움을 요청하거나 동료를 지원하는 능력",
-          "type": "ordinal",
-          "scale": [1, 5],
-          "rubric": {
-            "1": "고립", "2": "수동적", "3": "기본 상호작용", "4": "적극적 지원", "5": "상호 촉진"
-          },
-          "default": 3
+    "self_efficacy": {
+      "category": "affective",
+      "name": "수학 자기효능감",
+      "name_en": "Mathematics Self-Efficacy",
+      "description": "특정 수학 과제를 성공적으로 수행할 수 있다는 자신의 능력에 대한 신념. Bandura(2006)의 domain-specificity 원칙과 과제 단위 측정 권고에 따라 이번 수업 맥락(소수·합성수)에 밀착된 8문항으로 구성한다. 개념 숙련도와 분리된 feature로 유지한다.",
+      "measurement_method": "likert_self_report",
+      "measurement_note": "매 Stage 시작 전과 Stage 종료 후 두 시점에 수집 권장(pre/post). prompts/09_self_efficacy_survey.md 템플릿 사용. 응답은 Likert 4점 척도.",
+      "references": [
+        "Bandura, A. (2006). Guide for constructing self-efficacy scales. In F. Pajares & T. Urdan (Eds.), Self-efficacy beliefs of adolescents (pp. 307-337). Information Age Publishing.",
+        "Pajares, F., & Miller, M. D. (1995). Mathematics self-efficacy and mathematics performances: The need for specificity of assessment. Journal of Counseling Psychology, 42(2), 190-198.",
+        "OECD (2022). PISA 2022 technical report."
+      ],
+      "likert_scale": {
+        "1": "전혀 자신 없음",
+        "2": "별로 자신 있음",
+        "3": "자신 있음",
+        "4": "매우 자신 있음"
+      },
+      "items": [
+        {"id": "se_01", "stem": "어떤 수가 소수인지 합성수인지 판단할 수 있다.", "related_stage": 1},
+        {"id": "se_02", "stem": "어떤 수가 소수인지 합성수인지 이유와 함께 설명할 수 있다.", "related_stage": 1},
+        {"id": "se_03", "stem": "1이 왜 소수가 아닌지 설명할 수 있다.", "related_stage": 1},
+        {"id": "se_04", "stem": "어떤 수를 약수쌍으로 나타내어 소수인지 합성수인지 판단할 수 있다.", "related_stage": 2},
+        {"id": "se_05", "stem": "어떤 수를 배열(직사각형 만들기)로 생각해 소수인지 합성수인지 판단할 수 있다.", "related_stage": 2},
+        {"id": "se_06", "stem": "친구가 '홀수는 다 소수다'라고 말했을 때, 반례를 들어 설명할 수 있다.", "related_stage": 2},
+        {"id": "se_07", "stem": "내 생각이 맞는지 확인하기 위해 다른 방법으로 다시 검토할 수 있다.", "related_stage": 3},
+        {"id": "se_08", "stem": "민준이나 서연이와 이야기하면서 내 생각을 수학적으로 분명하게 설명할 수 있다.", "related_stage": "all"}
+      ],
+      "storage_structure": {
+        "per_item": "{item_id: {pre: int|null, post: int|null, history: [{timestamp, stage, phase, value}]}}",
+        "aggregate": "stage별 / 전체 평균 별도 계산"
+      }
+    }
+  },
+  "extension_slot": {
+    "name": "추가 정의적 요소 (+α)",
+    "description": "추후 추가될 수 있는 정의적/동기적 요소를 위한 예비 슬롯. 예: 학습에 대한 태도, 흥미, 수학 불안, 귀인 양식 등. 현재는 placeholder.",
+    "status": "placeholder",
+    "candidates": [
+      {
+        "key": "math_anxiety",
+        "name": "수학 불안",
+        "rationale": "자기효능감과 분리된 정서적 부담을 별도 측정",
+        "planned_measurement": "Likert 자기보고 또는 발화 기반 감정 추정"
+      },
+      {
+        "key": "interest_engagement",
+        "name": "흥미·몰입",
+        "rationale": "v1.0의 emotional_state.engagement를 대체·세분화",
+        "planned_measurement": "발화 단서 기반 Claude 추정"
+      },
+      {
+        "key": "attribution_style",
+        "name": "귀인 양식",
+        "rationale": "성공/실패 원인 귀인 패턴(노력 vs 능력 vs 운)",
+        "planned_measurement": "stage 종료 후 단문 응답"
+      }
+    ]
+  },
+  "instance_structure": {
+    "description": "create_learner_model_instance(config, name)가 생성하는 실제 인스턴스 형식 규약",
+    "schema": {
+      "student_name": "표시용 이름",
+      "models": {
+        "<model_key>": {
+          "<dimension_key>": {
+            "value": "<type별 값>",
+            "history": [
+              {"stage": "int", "value": "<type별 값>", "evidence": "str", "timestamp": "ISO8601?"}
+            ],
+            "per_stage_values": "{stage_int: value} — per_stage_tracking=true 인 차원에만 존재"
+          }
         }
       }
+    },
+    "type_rules": {
+      "ordinal": "value는 정수 1~scale[1], default 유지",
+      "list": "value는 항목 리스트, 중복 방지",
+      "counter": "value는 누적 정수, ≥0",
+      "stage_categorical": "value는 현재 stage의 최신 등급('A'~'E'), per_stage_values에 stage별 최신값 누적",
+      "likert_self_report": "self_efficacy 모델 내 items별 {pre, post, history} 구조 — instance_structure 예외 적용"
     }
   }
 }
