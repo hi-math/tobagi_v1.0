@@ -1,6 +1,7 @@
 # team4 — 수학교육평가론 협력학습 MVP
 
-사용자(Human) 1명 + AI 학생 2명이 함께 수업을 설계하는 협력학습 세션을 Claude API로 구동.
+사용자(Human) 1명 + AI 학생 2명이 함께 수업을 설계하는 협력학습 세션을 LLM API로 구동.
+기본 공급자는 **Google Gemini (무료 티어)** 이며, Anthropic Claude 로 전환도 가능하다.
 학습자 모델과 교수자 모델을 명시적으로 구현하고 Gradio 로 시각화한다.
 
 ## 폴더 구조
@@ -12,7 +13,7 @@ team4/
 │   ├── learner_model.json
 │   ├── tutor_model.json
 │   └── tasks.json
-├── prompts/                # Claude 프롬프트 템플릿 (MD)
+├── prompts/                # LLM 프롬프트 템플릿 (MD)
 │   ├── 01_learner_analysis.md
 │   ├── 02_tutor_decision.md
 │   ├── 03_ai_student_utterance.md
@@ -23,7 +24,7 @@ team4/
 ├── __init__.py             # 패키지 진입점 + bootstrap()
 ├── config_loader.py        # JSON/MD 로더
 ├── learner_model.py        # 학습자 모델 인스턴스 초기화
-├── llm_api.py              # Claude API 래퍼 + 프롬프트 유틸
+├── llm_api.py              # LLM API 래퍼 (Gemini / Claude) + 프롬프트 유틸
 ├── session.py              # CollaborativeSession (3-stage)
 ├── visualize.py            # Matplotlib 시각화 + 한글 폰트
 ├── gradio_app.py           # Gradio Blocks UI (launch_ui)
@@ -34,13 +35,16 @@ team4/
 
 ```python
 # 1. 의존성 + 폰트 + 리포 클론
-!pip install anthropic gradio -q
+!pip install google-generativeai gradio -q
 !apt-get -qq install fonts-nanum
 !git clone -q https://github.com/hi-math/team4.git   # 최초 1회
 
-# 2. 경로 설정 (리포지토리 루트)
+# 2. 경로 + 공급자 설정
 BASE_PATH = "team4"
-MODEL     = "claude-sonnet-4-20250514"
+PROVIDER  = "gemini"                 # "gemini" (무료) / "anthropic"
+MODEL     = "gemini-2.0-flash"       # Gemini 기본 (무료 티어)
+# MODEL   = "gemini-2.5-flash"       # 품질 필요 시 (유료)
+# MODEL   = "claude-haiku-4-5-20251001"  # PROVIDER="anthropic" 선택 시
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(BASE_PATH)) or ".")
@@ -49,8 +53,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(BASE_PATH)) or ".")
 from google.colab import userdata
 from team4 import bootstrap, launch_ui
 
+# Colab Secrets 에 GEMINI_API_KEY 를 먼저 등록해두어야 한다.
+# Gemini 키 발급: https://aistudio.google.com/app/apikey
 ctx = bootstrap(base_path=BASE_PATH,
-                api_key=userdata.get("CLAUDE_API_KEY"),
+                api_key=userdata.get("GEMINI_API_KEY"),
+                provider=PROVIDER,
                 model=MODEL,
                 setup_fonts=True)
 launch_ui(**ctx, share=True)
@@ -62,7 +69,7 @@ launch_ui(**ctx, share=True)
 |---|---|
 | `config_loader` | `load_config(base_path)` → `(CONFIG, PROMPTS)` |
 | `learner_model` | `init_learners(config)` → `{user, ai_1, ai_2}` |
-| `llm_api` | `ClaudeAPI(client, model).call(prompt, ...)`, `extract_json`, `render_prompt` |
+| `llm_api` | `GeminiAPI(model).call(prompt, ...)` / `ClaudeAPI(client, model).call(...)`, `extract_json`, `render_prompt` |
 | `session` | `CollaborativeSession(config, prompts, learner_models, api)` |
 | `visualize` | `radar_figure`, `history_figure`, `user_model_markdown`, `setup_korean_font`, `plot_radar_all`, `plot_user_history`, `print_user_model` |
 | `gradio_app` | `launch_ui(*, config, prompts, learner_models, api, share=True)` |

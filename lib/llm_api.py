@@ -1,20 +1,39 @@
-"""Claude API 호출 래퍼와 프롬프트 유틸.
+"""LLM API 호출 래퍼와 프롬프트 유틸.
 
-외부에서 anthropic.Anthropic 클라이언트를 주입 받아 ClaudeAPI 인스턴스를 만든다.
+Gemini와 Claude를 모두 지원하는 얇은 래퍼. 기본은 **Gemini 2.0 Flash (무료 티어)**.
+인스턴스가 제공하는 `.call()` 인터페이스는 공급자와 무관하게 동일:
+    api.call(prompt, max_tokens=..., temperature=..., model=None, stream=False) -> str
+    api.call(..., stream=True) -> Iterator[str]  (토큰 청크)
 
-기능:
-- call(): 동기 1회성 호출 (기존)
-- call(stream=True): 토큰 제너레이터 반환 (UX 개선용)
-- model= per-call 오버라이드: analyze/발화 모두 기본은 Haiku, 필요 시 Sonnet으로 전환
+session.py 쪽에서는 `self.api.call(...)` 만 호출하므로, 래퍼를 바꿔 끼우면
+공급자 교체가 투명하게 된다.
+
+사용:
+    # Gemini (무료/저렴, 기본 권장)
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_KEY)
+    api = GeminiAPI(model="gemini-2.0-flash")
+
+    # Anthropic (기존)
+    client = anthropic.Anthropic(api_key=CLAUDE_KEY)
+    api = ClaudeAPI(client, model=DEFAULT_HAIKU)
+
+bootstrap()은 provider= 인자로 둘 중 하나를 선택한다 (기본 "gemini").
 """
 
 import json
 import re
 
 
-# 기본 모델 상수 — 역할별로 속도/품질 트레이드오프
+# ---- Anthropic 모델 상수 (기존 Claude 경로 유지용) ----
 DEFAULT_SONNET = "claude-sonnet-4-20250514"
 DEFAULT_HAIKU = "claude-haiku-4-5-20251001"
+
+# ---- Gemini 모델 상수 ----
+# 2.0 Flash: 무료 티어 지원. 2.5 Flash는 유료지만 더 똑똑.
+DEFAULT_GEMINI_FLASH = "gemini-2.0-flash"
+DEFAULT_GEMINI_FLASH_LITE = "gemini-2.0-flash-lite"  # 더 빠르고 저렴
+DEFAULT_GEMINI_25 = "gemini-2.5-flash"               # 품질 필요 시
 
 
 class ClaudeAPI:
@@ -22,24 +41,16 @@ class ClaudeAPI:
 
     `call(stream=False)`로 호출하면 문자열을 반환하고,
     `call(stream=True)`로 호출하면 토큰 청크를 yield하는 제너레이터를 반환한다.
-    `model=` 인자로 호출마다 모델을 오버라이드할 수 있다 (기본 Haiku, 품질 필요 시 Sonnet).
-
-    ⚠️ 기본값은 DEFAULT_HAIKU. 인스턴스 생성 시 model을 명시하지 않아도 Haiku가 잡힌다.
+    `model=` 인자로 호출마다 모델을 오버라이드할 수 있다.
     """
+
+    provider = "anthropic"
 
     def __init__(self, client, model=DEFAULT_HAIKU):
         self.client = client
         self.model = model
 
     def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False):
-        """Claude 호출.
-
-        stream=False  → 완료된 응답 텍스트(str) 반환 (기본)
-        stream=True   → 토큰 청크(str)를 yield하는 제너레이터 반환
-                        (full text는 마지막에 ''.join하면 됨)
-
-        model=None이면 인스턴스 기본 모델 사용.
-        """
         use_model = model or self.model
         if stream:
             return self._call_stream(prompt, max_tokens, temperature, use_model)
@@ -52,11 +63,6 @@ class ClaudeAPI:
         return resp.content[0].text
 
     def _call_stream(self, prompt, max_tokens, temperature, model):
-        """토큰 청크를 yield하는 내부 제너레이터.
-
-        anthropic SDK의 messages.stream()을 사용한다. text_stream 이터레이터는
-        순수 텍스트 델타만 내보내며, thread-safe하게 여러 스트림을 병렬로 돌릴 수 있다.
-        """
         with self.client.messages.stream(
             model=model,
             max_tokens=max_tokens,
@@ -66,6 +72,71 @@ class ClaudeAPI:
             for chunk in s.text_stream:
                 if chunk:
                     yield chunk
+
+
+class GeminiAPI:
+    """google-generativeai 클라이언트를 래핑한 얇은 API 헬퍼.
+
+    인터페이스는 ClaudeAPI와 동일:
+        call(prompt, max_tokens=..., temperature=..., model=None, stream=False) -> str
+        call(..., stream=True) -> Iterator[str]
+
+    사전 조건: `genai.configure(api_key=...)` 가 이미 호출되어 있어야 한다.
+    bootstrap()이 이 초기화를 대신 해준다.
+
+    노트:
+    - Gemini SDK는 `max_output_tokens`, `temperature`를 generation_config로 받는다.
+    - 스트리밍: `model.generate_content(prompt, stream=True)` → chunk.text 이터레이터.
+    - 모델 인스턴스는 model 이름마다 캐시해 재사용 (호출마다 만들면 오버헤드).
+    """
+
+    provider = "gemini"
+
+    def __init__(self, model=DEFAULT_GEMINI_FLASH):
+        import google.generativeai as genai  # 지연 임포트
+        self._genai = genai
+        self.model = model
+        self._model_cache = {}  # model_name -> GenerativeModel
+
+    def _get_model(self, name):
+        if name not in self._model_cache:
+            self._model_cache[name] = self._genai.GenerativeModel(name)
+        return self._model_cache[name]
+
+    def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False):
+        use_model = model or self.model
+        gen_config = {
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        gm = self._get_model(use_model)
+        if stream:
+            return self._call_stream(gm, prompt, gen_config)
+        resp = gm.generate_content(prompt, generation_config=gen_config)
+        # 안전 필터 차단 등으로 text 속성이 없을 수 있음 → 폴백
+        try:
+            return resp.text
+        except Exception:
+            # 파트 단위로 긁어모으기
+            parts = []
+            for c in getattr(resp, "candidates", []) or []:
+                content = getattr(c, "content", None)
+                if content and getattr(content, "parts", None):
+                    for p in content.parts:
+                        t = getattr(p, "text", None)
+                        if t:
+                            parts.append(t)
+            if parts:
+                return "".join(parts)
+            # 마지막 수단: 빈 문자열. JSON extract_json이 ValueError를 내줄 것
+            return ""
+
+    def _call_stream(self, gm, prompt, gen_config):
+        resp_iter = gm.generate_content(prompt, generation_config=gen_config, stream=True)
+        for chunk in resp_iter:
+            t = getattr(chunk, "text", None)
+            if t:
+                yield t
 
 
 def extract_json(text):

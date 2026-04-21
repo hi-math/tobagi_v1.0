@@ -285,6 +285,68 @@ class CollaborativeSession:
         if deduped != speakers_in:
             print(f"       · [rotation-guard] 교정: {speakers_in} → {deduped}")
 
+    def _stage_complete_safety_net(self, decision, user_utterance):
+        """LLM이 stage_complete=false로 내려도, 학습자 발화(+최근 합산)가
+        명백히 완료 기준을 만족하면 true로 덮어쓴다.
+
+        현재 Stage의 번호에 따라 키워드 세트를 검사한다.
+        - Stage 1: 경로 A(약수 개수) 또는 경로 B(나눗셈 표현) 판정
+        - Stage 2: 31·37·41·43·47 중 4개 이상 등장 + 판정 근거 단서
+        """
+        if decision.get("stage_complete"):
+            return  # 이미 true면 그대로 둠
+
+        # 최근 3턴의 사용자 발화를 합쳐서 판정
+        recent_user = [user_utterance or ""]
+        for m in reversed(self.conversation[-10:]):
+            if m.get("speaker") == "사용자" and m.get("content") != user_utterance:
+                recent_user.append(m.get("content", ""))
+            if len(recent_user) >= 3:
+                break
+        combined = " ".join(recent_user)
+
+        stage = self.current_stage
+        hit_reason = None
+
+        if stage == 1:
+            # 경로 A: "약수" + ("2개" or "두개") AND ("3개" or "3 개" or "더 많")
+            has_div = "약수" in combined
+            prime_2 = any(k in combined for k in ["약수가 2개", "약수가 2 개", "약수가 두개",
+                                                   "약수가 두 개", "2개야", "두개야",
+                                                   "정확히 2개", "딱 2개", "딱 두개"])
+            comp_3 = any(k in combined for k in ["3개 이상", "3 개 이상", "세개 이상",
+                                                  "세 개 이상", "2개보다 많", "두개보다 많",
+                                                  "2개 이상", "약수가 많", "4개", "5개", "6개"])
+            if has_div and prime_2 and comp_3:
+                hit_reason = "경로A(약수 2개/3개 이상)"
+
+            # 경로 B: "1과 자기 자신" + "다른 수로 나" or "다른 약수"
+            path_b_prime = any(k in combined for k in [
+                "1과 자기 자신", "1이랑 자기 자신", "1과 자신",
+                "1, 자기 자신", "1이랑 자기자신",
+            ])
+            path_b_comp = any(k in combined for k in [
+                "다른 수로", "다른 약수", "다른 수도", "또 다른",
+                "외에", "이외", "2로도", "3으로도", "로도 나",
+            ])
+            if (path_b_prime and path_b_comp) and not hit_reason:
+                hit_reason = "경로B(나눗셈 정의)"
+
+        elif stage == 2:
+            primes = ["31", "37", "41", "43", "47"]
+            hits = sum(1 for p in primes if p in combined)
+            has_strategy = any(k in combined for k in [
+                "나눠", "나누어", "나누기", "2, 3, 5, 7", "2·3·5·7",
+                "체", "에라토스테네스",
+            ])
+            if hits >= 4 and has_strategy:
+                hit_reason = f"Stage2 소수 {hits}/5 + 판정 근거"
+
+        if hit_reason:
+            decision["stage_complete"] = True
+            print(f"       · [stage-guard] 완료 기준 충족 감지 → stage_complete=true "
+                  f"(reason: {hit_reason})")
+
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
 
@@ -619,6 +681,8 @@ class CollaborativeSession:
                 aid for aid in self.AI_KEYS if decision.get(f"{aid}_directive")
             ]
         self._enforce_rotation_guard(decision)
+        # stage_complete 안전망: LLM이 false여도 명시적 완료 기준을 충족하면 true로 교정
+        self._stage_complete_safety_net(decision, user_utterance)
         self.last_tutor_decision = decision
         return {"analysis": analysis, "decision": decision}
 
