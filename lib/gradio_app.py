@@ -55,45 +55,31 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         )
 
     def _split_paragraphs(text):
-        """AI 발화를 '채팅 같은' 여러 버블로 쪼갠다.
-
-        규칙(우선순위):
-            1) `\\n\\n` 빈 줄로 명시적 단락이 있으면 그걸 우선한다.
-            2) 그렇지 않으면 문장 종결부호(., ?, !, ~, …) 뒤를 문장 경계로 간주해 나눈다.
-               - 소수점(예: "12.5")은 분할하지 않는다 (종결부호 다음이 숫자면 skip).
-               - 따옴표/괄호가 종결부호 뒤에 붙어있으면 함께 잘린다.
-        결과가 2~4개 버블이 되도록 자연스럽게 쪼갠다. 원문이 한 문장뿐이면 리스트 1개.
-        """
+        """AI 발화를 '채팅 같은' 여러 버블로 쪼갠다."""
         import re
         text = (text or "").strip()
         if not text:
             return [""]
 
-        # 1) 단락 분할이 우선
         if "\n\n" in text:
             paras = [p.strip() for p in text.split("\n\n") if p.strip()]
             if len(paras) >= 2:
                 return paras
 
-        # 2) 문장 단위 분할 — 종결부호 뒤에 공백/개행/문자열 끝이 오면 경계.
-        #    단, 종결부호 다음이 숫자면(소수점) 분할하지 않음.
-        #    종결부호 뒤에 따라올 수 있는 닫는 따옴표/괄호는 포함한 뒤 끊는다.
         pattern = re.compile(r'(?<=[\.!\?~…])["\'\)\]\}」』]?\s+(?=\S)')
         candidate_splits = []
         pos = 0
         for m in pattern.finditer(text):
             end = m.end()
-            # 분할 뒤 문자가 숫자면(소수점) 해당 경계 건너뜀
             if end < len(text) and text[end].isdigit():
                 continue
-            candidate_splits.append((pos, m.start() + 1))  # 종결부호까지 포함
+            candidate_splits.append((pos, m.start() + 1))
             pos = end
 
         if pos < len(text):
             candidate_splits.append((pos, len(text)))
 
         parts = [text[s:e].strip() for (s, e) in candidate_splits if text[s:e].strip()]
-        # 너무 짧은 조각(5자 미만)만 앞 버블과 합침 (과하게 머지되면 "그럼 9는?" 같은 7자 짧은 문장이 분리 안 됨)
         merged = []
         for p in parts:
             if merged and len(p) < 5:
@@ -103,11 +89,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         return merged if merged else [text]
 
     def _bubble_messages(aid, name, text):
-        """한 AI 발화를 단락별 Chatbot 메시지 리스트로 변환.
-
-        첫 번째 버블만 이름 헤더를 표시하고, 이어지는 단락들은
-        동일 색상의 버블에 이름 없이 본문만 담아 시각적으로 '연속 발화'처럼 보이게 한다.
-        """
         parts = _split_paragraphs(text)
         out = []
         for i, p in enumerate(parts):
@@ -182,12 +163,24 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         return cps_heatmap_figure(config, learner_models)
 
     def _initial_history():
-        s = session.current_stage_info()
-        intro = session.stage_intro_utterance("ai_1")
-        return [
-            {"role": "assistant",
-             "content": _stage_card(session.current_stage, s)},
-        ] + _bubble_messages("ai_1", n1, intro)
+        import traceback
+        try:
+            s = session.current_stage_info()
+            intro = session.stage_intro_utterance("ai_1")
+            return [
+                {"role": "assistant",
+                 "content": _stage_card(session.current_stage, s)},
+            ] + _bubble_messages("ai_1", n1, intro)
+        except Exception as e:
+            tb = traceback.format_exc()
+            print("[initial_history 오류]\n" + tb)
+            err_html = (
+                f'<div style="border-left:4px solid #dc2626; background:#fef2f2;'
+                f' padding:10px 14px; border-radius:6px; font-family:ui-monospace,monospace;'
+                f' font-size:0.85em; white-space:pre-wrap;">'
+                f'<b>초기 발화 생성 중 오류</b>\n{type(e).__name__}: {e}\n\n{tb}</div>'
+            )
+            return [{"role": "assistant", "content": err_html}]
 
     def _rebuild_chat_from_session():
         """페이지 새로고침 시 session.conversation 기반으로 채팅을 재구성."""
@@ -240,25 +233,12 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         )
 
     def echo_user(msg, history):
-        """사용자 메시지를 chatbot에 즉시 반영하고 입력창을 비운다.
-
-        queue=False로 바인딩되기 때문에 Gradio 워커 큐를 타지 않고
-        analyze_and_decide (3~10s) 대기 없이 곧장 렌더된다.
-        빈 문자열이면 history를 건드리지 않아 다음 .then(stream_ai)가
-        user-turn 없음을 감지하고 조용히 종료한다.
-        """
         msg = (msg or "").strip()
         if not msg:
             return "", history
         return "", history + [{"role": "user", "content": msg}]
 
     def stream_ai(history):
-        """echo_user 직후 실행되는 실제 AI 스트리밍 파이프라인.
-
-        chatbot의 마지막 메시지가 방금 에코된 user 메시지라고 가정한다.
-        user 메시지가 아니면(빈 입력이어서 echo_user가 아무것도 안 붙인 경우)
-        dashboard만 갱신하고 종료.
-        """
         if not history or history[-1].get("role") != "user":
             yield _refresh_bundle(history, clear_msg=False)
             return
@@ -266,9 +246,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
         _streaming_flag[0] = True
         try:
-            # '학생들이 생각하는 중…' 플레이스홀더는 제거했다. 이유:
-            #   - user 메시지는 이미 echo_user 단계에서 즉시 뜬다
-            #   - 바로 이어서 AI 스트리밍 커서(▍)가 뜨도록 하는 편이 체감 지연이 짧다
             try:
                 prep = session.user_turn_prep(msg)
             except Exception as e:
@@ -288,9 +265,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             done_payloads = {}
             CURSOR = "▍"
 
-            # 토큰 갱신 throttle: 매 토큰마다 yield하면 Gradio 프레임이 밀린다.
-            # 누적 길이가 이전 yield 기준 + THROTTLE_CHARS 넘어가면 yield.
-            # 12 → 6으로 낮춰 체감 스트리밍 속도가 더 빠르게 느껴지게.
             THROTTLE_CHARS = 6
             last_yield_len = {}
 
@@ -311,22 +285,18 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         "role": "assistant",
                         "content": _bubble(aid, AI_NAME_BY_ID[aid], buf[aid] + CURSOR),
                     }
-                    # throttle: THROTTLE_CHARS만큼 누적되거나 개행이 들어왔을 때만 yield
                     cur_len = len(buf[aid])
                     if cur_len - last_yield_len.get(aid, 0) >= THROTTLE_CHARS or "\n" in payload:
                         last_yield_len[aid] = cur_len
                         yield _chat_only(history, clear_msg=False)
                 elif ev == "done":
                     done_payloads[aid] = payload
-                    # 스트리밍 중엔 절대로 _refresh_bundle 호출하지 말 것 (plot 6개 재렌더가 chat를 막는다).
                     history[slot[aid]] = {
                         "role": "assistant",
                         "content": _bubble(aid, AI_NAME_BY_ID[aid], payload),
                     }
                     yield _chat_only(history, clear_msg=False)
 
-            # 모든 AI 스트리밍이 끝난 뒤 단락/문장 단위로 버블 분할.
-            # slot 인덱스가 큰 것부터 처리해야 뒤쪽 insert가 앞쪽 slot 위치를 깨뜨리지 않는다.
             for aid in sorted(slot.keys(), key=lambda a: slot[a], reverse=True):
                 text = done_payloads.get(aid, "")
                 msgs = _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
@@ -350,14 +320,11 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     history.append({"role": "assistant",
                                     "content": _system_bubble("모든 Stage 완료. 오른쪽 탭이 자동으로 최신 상태입니다.")})
 
-            # 대시보드(plot 6개) 재렌더는 모든 스트리밍이 완전히 끝난 뒤 단 한 번만.
             yield _refresh_bundle(history, clear_msg=False)
         finally:
             _streaming_flag[0] = False
 
     def on_silence_tick(history):
-        # on_submit이 스트리밍 중이면 chatbot을 건드리지 않는다.
-        # (타이머가 15s마다 발화 중인 buffer를 덮어써 메시지가 사라지는 현상 방지)
         if _streaming_flag[0]:
             return history
         try:
@@ -442,10 +409,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
         auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
 
-        # 2단계 체인:
-        #   (1) echo_user: queue=False → 유저 메시지를 즉시 chatbot에 띄우고 입력창 비우기
-        #   (2) stream_ai: analyze_and_decide 포함 전체 AI 스트리밍 (큐를 탐)
-        # 이렇게 나눠야 analyze 대기(~수 초) 동안에도 사용자 발화가 UI에 먼저 보인다.
         send.click(
             echo_user, [msg, chatbot], [msg, chatbot], queue=False
         ).then(stream_ai, chatbot, auto_outputs)
