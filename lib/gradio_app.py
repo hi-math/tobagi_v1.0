@@ -1,4 +1,4 @@
-"""Gradio 채팅 인터페이스 (V4 + 토큰 스트리밍 + 새로고침 싱크).
+"""Gradio 채팅 인터페이스 (V5 + 문장 단위 버블 분할, rev-b).
 
 왼쪽 패널: Chatbot(발화자별 컬러 버블) + 입력 / 오른쪽 탭: 레이더 · 변화 추이 · 학습자모델 · 교수자 Decision
 
@@ -55,9 +55,52 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         )
 
     def _split_paragraphs(text):
-        """AI 발화를 빈 줄(\\n\\n) 기준으로 단락 리스트로 분할."""
-        parts = [p.strip() for p in (text or "").split("\n\n") if p.strip()]
-        return parts if parts else [(text or "").strip()]
+        """AI 발화를 '채팅 같은' 여러 버블로 쪼갠다.
+
+        규칙(우선순위):
+            1) `\\n\\n` 빈 줄로 명시적 단락이 있으면 그걸 우선한다.
+            2) 그렇지 않으면 문장 종결부호(., ?, !, ~, …) 뒤를 문장 경계로 간주해 나눈다.
+               - 소수점(예: "12.5")은 분할하지 않는다 (종결부호 다음이 숫자면 skip).
+               - 따옴표/괄호가 종결부호 뒤에 붙어있으면 함께 잘린다.
+        결과가 2~4개 버블이 되도록 자연스럽게 쪼갠다. 원문이 한 문장뿐이면 리스트 1개.
+        """
+        import re
+        text = (text or "").strip()
+        if not text:
+            return [""]
+
+        # 1) 단락 분할이 우선
+        if "\n\n" in text:
+            paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+            if len(paras) >= 2:
+                return paras
+
+        # 2) 문장 단위 분할 — 종결부호 뒤에 공백/개행/문자열 끝이 오면 경계.
+        #    단, 종결부호 다음이 숫자면(소수점) 분할하지 않음.
+        #    종결부호 뒤에 따라올 수 있는 닫는 따옴표/괄호는 포함한 뒤 끊는다.
+        pattern = re.compile(r'(?<=[\.!\?~…])["\'\)\]\}」』]?\s+(?=\S)')
+        candidate_splits = []
+        pos = 0
+        for m in pattern.finditer(text):
+            end = m.end()
+            # 분할 뒤 문자가 숫자면(소수점) 해당 경계 건너뜀
+            if end < len(text) and text[end].isdigit():
+                continue
+            candidate_splits.append((pos, m.start() + 1))  # 종결부호까지 포함
+            pos = end
+
+        if pos < len(text):
+            candidate_splits.append((pos, len(text)))
+
+        parts = [text[s:e].strip() for (s, e) in candidate_splits if text[s:e].strip()]
+        # 너무 짧은 조각(5자 미만)만 앞 버블과 합침 (과하게 머지되면 "그럼 9는?" 같은 7자 짧은 문장이 분리 안 됨)
+        merged = []
+        for p in parts:
+            if merged and len(p) < 5:
+                merged[-1] = (merged[-1] + " " + p).strip()
+            else:
+                merged.append(p)
+        return merged if merged else [text]
 
     def _bubble_messages(aid, name, text):
         """한 AI 발화를 단락별 Chatbot 메시지 리스트로 변환.
@@ -97,7 +140,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             f'overflow:hidden; margin:6px 0; box-shadow:0 2px 6px rgba(79,70,229,0.15);">'
             f'<div style="background:{accent}; color:white; padding:10px 16px; '
             f'font-weight:700; letter-spacing:0.5px; font-size:1.05em;">'
-            f'📋 STAGE {stage_num}'
+            f'STAGE {stage_num}'
             f'</div>'
             f'<div style="background:{body_bg}; padding:14px 16px; color:#1e1b4b;">'
             f'<div style="font-size:1.15em; font-weight:700; color:{accent_dark}; '
@@ -223,25 +266,22 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
         _streaming_flag[0] = True
         try:
-            thinking_idx = len(history)
-            history = history + [{"role": "assistant",
-                                  "content": _system_bubble("_학생들이 생각하는 중…_")}]
-            yield _chat_only(history, clear_msg=False)
-
+            # '학생들이 생각하는 중…' 플레이스홀더는 제거했다. 이유:
+            #   - user 메시지는 이미 echo_user 단계에서 즉시 뜬다
+            #   - 바로 이어서 AI 스트리밍 커서(▍)가 뜨도록 하는 편이 체감 지연이 짧다
             try:
                 prep = session.user_turn_prep(msg)
             except Exception as e:
-                history[thinking_idx] = {"role": "assistant", "content": f"⚠️ 오류: {e}"}
+                history = history + [{"role": "assistant", "content": f"오류: {e}"}]
                 yield _refresh_bundle(history, clear_msg=False)
                 return
 
             decision = prep["decision"]
 
-            history = history[:thinking_idx]
             if prep["user_mode"] == "teacher":
-                history.append({"role": "assistant",
-                                "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")})
-            yield _chat_only(history, clear_msg=False)
+                history = history + [{"role": "assistant",
+                                      "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")}]
+                yield _chat_only(history, clear_msg=False)
 
             slot = {}
             buf = {}
@@ -250,7 +290,8 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
             # 토큰 갱신 throttle: 매 토큰마다 yield하면 Gradio 프레임이 밀린다.
             # 누적 길이가 이전 yield 기준 + THROTTLE_CHARS 넘어가면 yield.
-            THROTTLE_CHARS = 12
+            # 12 → 6으로 낮춰 체감 스트리밍 속도가 더 빠르게 느껴지게.
+            THROTTLE_CHARS = 6
             last_yield_len = {}
 
             for ev, aid, payload in session.stream_ai_turns_tokens(
@@ -270,7 +311,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         "role": "assistant",
                         "content": _bubble(aid, AI_NAME_BY_ID[aid], buf[aid] + CURSOR),
                     }
-                    # throttle: 12자씩 누적되거나 개행이 들어왔을 때만 yield
+                    # throttle: THROTTLE_CHARS만큼 누적되거나 개행이 들어왔을 때만 yield
                     cur_len = len(buf[aid])
                     if cur_len - last_yield_len.get(aid, 0) >= THROTTLE_CHARS or "\n" in payload:
                         last_yield_len[aid] = cur_len
@@ -284,7 +325,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     }
                     yield _chat_only(history, clear_msg=False)
 
-            # 모든 AI 스트리밍이 끝난 뒤 단락(\n\n) 단위로 버블 분할.
+            # 모든 AI 스트리밍이 끝난 뒤 단락/문장 단위로 버블 분할.
             # slot 인덱스가 큰 것부터 처리해야 뒤쪽 insert가 앞쪽 slot 위치를 깨뜨리지 않는다.
             for aid in sorted(slot.keys(), key=lambda a: slot[a], reverse=True):
                 text = done_payloads.get(aid, "")
@@ -346,7 +387,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         return history
 
     with gr.Blocks(title="협력학습 세션", theme=gr.themes.Soft()) as demo:
-        gr.Markdown(f"# 🎓 {session.task['task_title']}")
+        gr.Markdown(f"# {session.task['task_title']}")
         with gr.Row():
             with gr.Column(scale=3):
                 chatbot = gr.Chatbot(
@@ -363,41 +404,41 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     )
                     send = gr.Button("보내기", variant="primary", scale=1)
                 with gr.Row():
-                    next_btn = gr.Button("▶ 다음 Stage")
-                    refresh_all_btn = gr.Button("🔄 대시보드 전체 갱신")
+                    next_btn = gr.Button("다음 Stage")
+                    refresh_all_btn = gr.Button("대시보드 전체 갱신")
 
             with gr.Column(scale=2):
                 with gr.Tabs():
-                    with gr.Tab("① 🕸️ 레이더"):
+                    with gr.Tab("① 레이더"):
                         gr.Markdown("_학습자 모델의 주요 요소를 방사형 그래프로 한눈에 조감합니다._")
                         radar = gr.Plot(label="사용자 레이더")
-                        gr.Button("🔄 갱신").click(_radar, outputs=radar)
-                    with gr.Tab("② 🧠 학습자 모델"):
+                        gr.Button("갱신").click(_radar, outputs=radar)
+                    with gr.Tab("② 학습자 모델"):
                         gr.Markdown("_인지/정의 카테고리별 하위요소 점수와 루브릭 해석입니다._")
                         model_md = gr.Markdown()
-                        gr.Button("🔄 갱신").click(_model_md, outputs=model_md)
-                    with gr.Tab("③ 📈 변화 추이"):
+                        gr.Button("갱신").click(_model_md, outputs=model_md)
+                    with gr.Tab("③ 변화 추이"):
                         gr.Markdown("_업데이트 회차에 따른 각 하위요소의 변화 추이입니다._")
                         hist_plot = gr.Plot(label="사용자 단계별 변화")
-                        gr.Button("🔄 갱신").click(_history, outputs=hist_plot)
-                    with gr.Tab("④ 🧭 교수자 디시젼"):
+                        gr.Button("갱신").click(_history, outputs=hist_plot)
+                    with gr.Tab("④ 교수자 디시젼"):
                         gr.Markdown("_가장 최근 턴의 교수자 모델이 내린 의사결정(JSON)입니다._")
                         dec_code = gr.Code(language="json", label="last_tutor_decision")
-                        gr.Button("🔄 갱신").click(_decision_json, outputs=dec_code)
-                    with gr.Tab("⑤ ⏱️ 오개념 타임라인"):
+                        gr.Button("갱신").click(_decision_json, outputs=dec_code)
+                    with gr.Tab("⑤ 오개념 타임라인"):
                         gr.Markdown(
                             "_관찰된 오개념이 언제 등장해서 언제 해소됐는지 간트 차트로 표시합니다. "
-                            "🟢 = 해소, 🔴 = 현재 지속._"
+                            "초록=해소, 빨강=현재 지속._"
                         )
                         misc_plot = gr.Plot(label="오개념 타임라인")
-                        gr.Button("🔄 갱신").click(_misconception_timeline, outputs=misc_plot)
-                    with gr.Tab("⑥ 🤝 CPS 히트맵"):
+                        gr.Button("갱신").click(_misconception_timeline, outputs=misc_plot)
+                    with gr.Tab("⑥ CPS 히트맵"):
                         gr.Markdown(
                             "_Stage × CPS 하위구인(공동이해·행동·조직화·수정) 매트릭스. "
                             "각 stage에서 어떤 협력 행동이 많이 관찰됐는지 색 진하기로 표시._"
                         )
                         cps_plot = gr.Plot(label="CPS 히트맵")
-                        gr.Button("🔄 갱신").click(_cps_heatmap, outputs=cps_plot)
+                        gr.Button("갱신").click(_cps_heatmap, outputs=cps_plot)
 
         auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
 

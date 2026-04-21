@@ -167,6 +167,75 @@ class CollaborativeSession:
         recent = self.conversation[-n:]
         return "\n".join(f"[{m['speaker']}]: {m['content']}" for m in recent) or "(아직 대화 없음)"
 
+    def speaker_frequency(self, n=8):
+        """최근 n턴의 AI별 발화 횟수 + 마지막 발화 기준 턴 간격을 요약한다.
+
+        예: "최근 8턴 중 민준 3 · 서연 0 · 연우 4 · 사용자 1
+             · 서연 마지막 발화 이후 8턴 경과(오래 침묵)".
+
+        LLM이 스스로 speaking_agents 편중을 감지해 rotation하도록 단서를 준다.
+        """
+        recent = self.conversation[-n:] if n and n > 0 else self.conversation
+        names = {
+            "ai_1": self.config["personas"]["ai_students"]["ai_1"]["name"],
+            "ai_2": self.config["personas"]["ai_students"]["ai_2"]["name"],
+            "ai_3": self.config["personas"]["ai_students"]["ai_3"]["name"],
+        }
+        count = {"ai_1": 0, "ai_2": 0, "ai_3": 0, "user": 0}
+        # 각 AI가 "몇 턴 전에 마지막으로 말했는지" 계산 (없으면 None)
+        last_gap = {"ai_1": None, "ai_2": None, "ai_3": None}
+        total = len(self.conversation)
+        for i, m in enumerate(self.conversation):
+            turns_ago = total - 1 - i
+            speaker = m.get("speaker", "")
+            aid = m.get("agent_id")
+            if not aid:
+                for k, nm in names.items():
+                    if nm == speaker:
+                        aid = k
+                        break
+            if aid in last_gap:
+                last_gap[aid] = turns_ago
+        for m in recent:
+            speaker = m.get("speaker", "")
+            if speaker == "사용자":
+                count["user"] += 1
+                continue
+            aid = m.get("agent_id")
+            if not aid:
+                for k, nm in names.items():
+                    if nm == speaker:
+                        aid = k
+                        break
+            if aid in count:
+                count[aid] += 1
+
+        parts = [
+            f"최근 {len(recent)}턴 중",
+            f"{names['ai_1']}(ai_1) {count['ai_1']}회",
+            f"{names['ai_2']}(ai_2) {count['ai_2']}회",
+            f"{names['ai_3']}(ai_3) {count['ai_3']}회",
+            f"사용자 {count['user']}회",
+        ]
+        # 가장 오래 쉰 AI를 하이라이트
+        never_spoken = [a for a, g in last_gap.items() if g is None]
+        quiet_hints = []
+        if never_spoken:
+            quiet_hints.append(
+                " / ".join(f"{names[a]}({a}) 아직 발화 없음" for a in never_spoken)
+            )
+        else:
+            max_gap_aid = max(last_gap, key=lambda a: last_gap[a])
+            max_gap = last_gap[max_gap_aid]
+            if max_gap is not None and max_gap >= 4:
+                quiet_hints.append(
+                    f"{names[max_gap_aid]}({max_gap_aid})가 마지막으로 말한 뒤 {max_gap}턴 경과 → rotation 권장"
+                )
+        summary = " · ".join(parts)
+        if quiet_hints:
+            summary += "\n" + " / ".join(quiet_hints)
+        return summary
+
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
 
@@ -308,6 +377,7 @@ class CollaborativeSession:
             "role_pool": tm["ai_student_role_assignment"]["role_pool"],
             "silence_prompt_policy": tm.get("silence_prompt_policy", {}),
             "user_as_teacher_policy": tm.get("user_as_teacher_policy", {}),
+            "speaker_frequency": self.speaker_frequency(8),
             "domain_knowledge": self._domain_text(),
         })
         try:
@@ -446,12 +516,14 @@ class CollaborativeSession:
             "user_silence_seconds": "0",
             "last_silence_trigger_agent": self.last_silence_agent or "(없음)",
             "user_mode_hint": self.current_user_mode,
+            # 최근 AI별 발화 분포 — speaking_agents 편중 방지 근거로 LLM에 전달
+            "speaker_frequency": self.speaker_frequency(8),
             "domain_knowledge": self._domain_text(),
         })
         try:
-            # analyze+decide 통합 JSON은 보통 500~700 토큰으로 수렴.
-            # 1400 → 900으로 낮춰 사용자 발화→첫 스트리밍 사이의 대기 시간 단축.
-            raw = self.api.call(prompt, max_tokens=900, temperature=0.4)
+            # analyze+decide 통합 JSON은 보통 450~650 토큰으로 수렴.
+            # 900 → 700으로 추가 다이어트 — 첫 AI 토큰이 뜨기까지 대기를 더 줄인다.
+            raw = self.api.call(prompt, max_tokens=700, temperature=0.4)
             merged = extract_json(raw)
         except Exception as e:
             print(f"  ⚠️ 통합 분석/결정 실패: {e} — 폴백 분리 호출")
