@@ -5,7 +5,7 @@
 기능:
 - call(): 동기 1회성 호출 (기존)
 - call(stream=True): 토큰 제너레이터 반환 (UX 개선용)
-- model= per-call 오버라이드: analyze는 Haiku, 발화는 Sonnet 등 분리 라우팅
+- model= per-call 오버라이드: analyze/발화 모두 기본은 Haiku, 필요 시 Sonnet으로 전환
 """
 
 import json
@@ -22,10 +22,12 @@ class ClaudeAPI:
 
     `call(stream=False)`로 호출하면 문자열을 반환하고,
     `call(stream=True)`로 호출하면 토큰 청크를 yield하는 제너레이터를 반환한다.
-    `model=` 인자로 호출마다 모델을 오버라이드할 수 있다 (analyze는 Haiku, 발화는 Sonnet).
+    `model=` 인자로 호출마다 모델을 오버라이드할 수 있다 (기본 Haiku, 품질 필요 시 Sonnet).
+
+    ⚠️ 기본값은 DEFAULT_HAIKU. 인스턴스 생성 시 model을 명시하지 않아도 Haiku가 잡힌다.
     """
 
-    def __init__(self, client, model=DEFAULT_SONNET):
+    def __init__(self, client, model=DEFAULT_HAIKU):
         self.client = client
         self.model = model
 
