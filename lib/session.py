@@ -417,7 +417,9 @@ class CollaborativeSession:
             silence_trigger=silence_trigger,
             user_silence_seconds=user_silence_seconds,
         )
-        raw = self.api.call(prompt, max_tokens=400, temperature=0.9)
+        # max_tokens: 학생 발화는 2~4문장 제한이므로 220이면 충분.
+        # 400 → 220으로 낮춰 tail latency 단축.
+        raw = self.api.call(prompt, max_tokens=220, temperature=0.9)
         return sanitize_ai_output(raw)
 
     def analyze_and_decide(self, user_utterance):
@@ -447,7 +449,9 @@ class CollaborativeSession:
             "domain_knowledge": self._domain_text(),
         })
         try:
-            raw = self.api.call(prompt, max_tokens=1400, temperature=0.4)
+            # analyze+decide 통합 JSON은 보통 500~700 토큰으로 수렴.
+            # 1400 → 900으로 낮춰 사용자 발화→첫 스트리밍 사이의 대기 시간 단축.
+            raw = self.api.call(prompt, max_tokens=900, temperature=0.4)
             merged = extract_json(raw)
         except Exception as e:
             print(f"  ⚠️ 통합 분석/결정 실패: {e} — 폴백 분리 호출")
@@ -605,8 +609,10 @@ class CollaborativeSession:
             started = False
             buf = []
             try:
+                # 스트리밍 워커: 400 → 220으로 낮춰 발화 전체가 빨리 끝나도록.
+                # (Haiku는 TTFT보다 tail 토큰 수가 체감 레이턴시를 더 좌우함)
                 stream = self.api.call(
-                    prompt, max_tokens=400, temperature=0.9, stream=True,
+                    prompt, max_tokens=220, temperature=0.9, stream=True,
                 )
                 for chunk in stream:
                     if not chunk:
@@ -713,7 +719,9 @@ class CollaborativeSession:
             "silence_seconds": round(silence, 1),
         })
         self.last_silence_agent = aid
-        self.last_user_utterance_ts = time.time() - min_seconds + 30
+        # AI가 선제 발화한 시점을 "사용자 발화"로 간주해 타이머를 완전 리셋.
+        # 이로써 다음 nudge도 동일하게 SILENCE_THRESHOLD_SECONDS(=60s) 이상 침묵해야 발생.
+        self.last_user_utterance_ts = time.time()
         return {"agent_id": aid, "text": text, "decision": decision}
 
     def advance_stage(self):
@@ -735,7 +743,8 @@ class CollaborativeSession:
             "my_persona": persona,
             "domain_knowledge": self._domain_text(),
         })
-        raw = self.api.call(prompt, max_tokens=300, temperature=0.8)
+        # stage intro도 짧은 오프닝 발화 → 180이면 충분.
+        raw = self.api.call(prompt, max_tokens=180, temperature=0.8)
         text = sanitize_ai_output(raw)
         self.conversation.append({
             "speaker": persona["name"],

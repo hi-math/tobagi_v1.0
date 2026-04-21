@@ -24,6 +24,10 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
     import gradio as gr
 
     session = CollaborativeSession(config, prompts, learner_models, api)
+
+    # on_submit 진행 중에는 침묵 타이머가 chatbot을 덮어쓰지 못하도록 가드.
+    # 리스트로 감싼 이유는 클로저 내부에서 재할당 없이 상태를 바꾸기 위함.
+    _streaming_flag = [False]
     n1 = config["personas"]["ai_students"]["ai_1"]["name"]
     n2 = config["personas"]["ai_students"]["ai_2"]["name"]
     n3 = config["personas"]["ai_students"]["ai_3"]["name"]
@@ -192,95 +196,129 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             gr.update(), gr.update(), gr.update(),
         )
 
-    def on_submit(msg, history):
+    def echo_user(msg, history):
+        """사용자 메시지를 chatbot에 즉시 반영하고 입력창을 비운다.
+
+        queue=False로 바인딩되기 때문에 Gradio 워커 큐를 타지 않고
+        analyze_and_decide (3~10s) 대기 없이 곧장 렌더된다.
+        빈 문자열이면 history를 건드리지 않아 다음 .then(stream_ai)가
+        user-turn 없음을 감지하고 조용히 종료한다.
+        """
         msg = (msg or "").strip()
         if not msg:
-            yield _refresh_bundle(history)
-            return
+            return "", history
+        return "", history + [{"role": "user", "content": msg}]
 
-        history = history + [{"role": "user", "content": msg}]
-        yield _chat_only(history, clear_msg=True)
+    def stream_ai(history):
+        """echo_user 직후 실행되는 실제 AI 스트리밍 파이프라인.
 
-        thinking_idx = len(history)
-        history = history + [{"role": "assistant",
-                              "content": _system_bubble("_학생들이 생각하는 중…_")}]
-        yield _chat_only(history, clear_msg=False)
-
-        try:
-            prep = session.user_turn_prep(msg)
-        except Exception as e:
-            history[thinking_idx] = {"role": "assistant", "content": f"⚠️ 오류: {e}"}
+        chatbot의 마지막 메시지가 방금 에코된 user 메시지라고 가정한다.
+        user 메시지가 아니면(빈 입력이어서 echo_user가 아무것도 안 붙인 경우)
+        dashboard만 갱신하고 종료.
+        """
+        if not history or history[-1].get("role") != "user":
             yield _refresh_bundle(history, clear_msg=False)
             return
+        msg = history[-1]["content"]
 
-        decision = prep["decision"]
-
-        history = history[:thinking_idx]
-        if prep["user_mode"] == "teacher":
-            history.append({"role": "assistant",
-                            "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")})
-        yield _chat_only(history, clear_msg=False)
-
-        slot = {}
-        buf = {}
-        done_payloads = {}
-        CURSOR = "▍"
-
-        for ev, aid, payload in session.stream_ai_turns_tokens(
-            msg, decision,
-            silence_trigger=decision.get("silence_trigger", False),
-        ):
-            if ev == "start":
-                buf[aid] = ""
-                slot[aid] = len(history)
-                history.append({"role": "assistant",
-                                "content": _bubble(aid, AI_NAME_BY_ID[aid], CURSOR)})
-                yield _chat_only(history, clear_msg=False)
-            elif ev == "update":
-                buf[aid] = buf.get(aid, "") + payload
-                history[slot[aid]] = {
-                    "role": "assistant",
-                    "content": _bubble(aid, AI_NAME_BY_ID[aid], buf[aid] + CURSOR),
-                }
-                yield _chat_only(history, clear_msg=False)
-            elif ev == "done":
-                done_payloads[aid] = payload
-                # 스트리밍 끝난 시점엔 일단 단일 버블로 고정 (분할은 뒤에서 일괄 처리).
-                history[slot[aid]] = {
-                    "role": "assistant",
-                    "content": _bubble(aid, AI_NAME_BY_ID[aid], payload),
-                }
-                yield _refresh_bundle(history, clear_msg=False)
-
-        # 모든 AI 스트리밍이 끝난 뒤 단락(\n\n) 단위로 버블 분할.
-        # slot 인덱스가 큰 것부터 처리해야 뒤쪽 insert가 앞쪽 slot 위치를 깨뜨리지 않는다.
-        for aid in sorted(slot.keys(), key=lambda a: slot[a], reverse=True):
-            text = done_payloads.get(aid, "")
-            msgs = _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
-            if len(msgs) <= 1:
-                continue
-            history[slot[aid]] = msgs[0]
-            for m in reversed(msgs[1:]):
-                history.insert(slot[aid] + 1, m)
-        if done_payloads:
+        _streaming_flag[0] = True
+        try:
+            thinking_idx = len(history)
+            history = history + [{"role": "assistant",
+                                  "content": _system_bubble("_학생들이 생각하는 중…_")}]
             yield _chat_only(history, clear_msg=False)
 
-        if decision.get("stage_complete"):
-            history.append({"role": "assistant",
-                            "content": _system_bubble(f"Stage {session.current_stage} 완료")})
-            if session.advance_stage():
-                s = session.current_stage_info()
+            try:
+                prep = session.user_turn_prep(msg)
+            except Exception as e:
+                history[thinking_idx] = {"role": "assistant", "content": f"⚠️ 오류: {e}"}
+                yield _refresh_bundle(history, clear_msg=False)
+                return
+
+            decision = prep["decision"]
+
+            history = history[:thinking_idx]
+            if prep["user_mode"] == "teacher":
                 history.append({"role": "assistant",
-                                "content": _stage_card(session.current_stage, s)})
-                yield _chat_only(history, clear_msg=False)
-                intro = session.stage_intro_utterance("ai_2")
-                history.extend(_bubble_messages("ai_2", n2, intro))
-            else:
+                                "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")})
+            yield _chat_only(history, clear_msg=False)
+
+            slot = {}
+            buf = {}
+            done_payloads = {}
+            CURSOR = "▍"
+
+            # 토큰 갱신 throttle: 매 토큰마다 yield하면 Gradio 프레임이 밀린다.
+            # 누적 길이가 이전 yield 기준 + THROTTLE_CHARS 넘어가면 yield.
+            THROTTLE_CHARS = 12
+            last_yield_len = {}
+
+            for ev, aid, payload in session.stream_ai_turns_tokens(
+                msg, decision,
+                silence_trigger=decision.get("silence_trigger", False),
+            ):
+                if ev == "start":
+                    buf[aid] = ""
+                    slot[aid] = len(history)
+                    last_yield_len[aid] = 0
+                    history.append({"role": "assistant",
+                                    "content": _bubble(aid, AI_NAME_BY_ID[aid], CURSOR)})
+                    yield _chat_only(history, clear_msg=False)
+                elif ev == "update":
+                    buf[aid] = buf.get(aid, "") + payload
+                    history[slot[aid]] = {
+                        "role": "assistant",
+                        "content": _bubble(aid, AI_NAME_BY_ID[aid], buf[aid] + CURSOR),
+                    }
+                    # throttle: 12자씩 누적되거나 개행이 들어왔을 때만 yield
+                    cur_len = len(buf[aid])
+                    if cur_len - last_yield_len.get(aid, 0) >= THROTTLE_CHARS or "\n" in payload:
+                        last_yield_len[aid] = cur_len
+                        yield _chat_only(history, clear_msg=False)
+                elif ev == "done":
+                    done_payloads[aid] = payload
+                    # 스트리밍 중엔 절대로 _refresh_bundle 호출하지 말 것 (plot 6개 재렌더가 chat를 막는다).
+                    history[slot[aid]] = {
+                        "role": "assistant",
+                        "content": _bubble(aid, AI_NAME_BY_ID[aid], payload),
+                    }
+                    yield _chat_only(history, clear_msg=False)
+
+            # 모든 AI 스트리밍이 끝난 뒤 단락(\n\n) 단위로 버블 분할.
+            # slot 인덱스가 큰 것부터 처리해야 뒤쪽 insert가 앞쪽 slot 위치를 깨뜨리지 않는다.
+            for aid in sorted(slot.keys(), key=lambda a: slot[a], reverse=True):
+                text = done_payloads.get(aid, "")
+                msgs = _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
+                if len(msgs) <= 1:
+                    continue
+                history[slot[aid]] = msgs[0]
+                for m in reversed(msgs[1:]):
+                    history.insert(slot[aid] + 1, m)
+
+            if decision.get("stage_complete"):
                 history.append({"role": "assistant",
-                                "content": _system_bubble("모든 Stage 완료. 오른쪽 탭이 자동으로 최신 상태입니다.")})
+                                "content": _system_bubble(f"Stage {session.current_stage} 완료")})
+                if session.advance_stage():
+                    s = session.current_stage_info()
+                    history.append({"role": "assistant",
+                                    "content": _stage_card(session.current_stage, s)})
+                    yield _chat_only(history, clear_msg=False)
+                    intro = session.stage_intro_utterance("ai_2")
+                    history.extend(_bubble_messages("ai_2", n2, intro))
+                else:
+                    history.append({"role": "assistant",
+                                    "content": _system_bubble("모든 Stage 완료. 오른쪽 탭이 자동으로 최신 상태입니다.")})
+
+            # 대시보드(plot 6개) 재렌더는 모든 스트리밍이 완전히 끝난 뒤 단 한 번만.
             yield _refresh_bundle(history, clear_msg=False)
+        finally:
+            _streaming_flag[0] = False
 
     def on_silence_tick(history):
+        # on_submit이 스트리밍 중이면 chatbot을 건드리지 않는다.
+        # (타이머가 15s마다 발화 중인 buffer를 덮어써 메시지가 사라지는 현상 방지)
+        if _streaming_flag[0]:
+            return history
         try:
             result = session.nudge_on_silence()
         except Exception as e:
@@ -362,8 +400,17 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         gr.Button("🔄 갱신").click(_cps_heatmap, outputs=cps_plot)
 
         auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot]
-        send.click(on_submit, [msg, chatbot], auto_outputs)
-        msg.submit(on_submit, [msg, chatbot], auto_outputs)
+
+        # 2단계 체인:
+        #   (1) echo_user: queue=False → 유저 메시지를 즉시 chatbot에 띄우고 입력창 비우기
+        #   (2) stream_ai: analyze_and_decide 포함 전체 AI 스트리밍 (큐를 탐)
+        # 이렇게 나눠야 analyze 대기(~수 초) 동안에도 사용자 발화가 UI에 먼저 보인다.
+        send.click(
+            echo_user, [msg, chatbot], [msg, chatbot], queue=False
+        ).then(stream_ai, chatbot, auto_outputs)
+        msg.submit(
+            echo_user, [msg, chatbot], [msg, chatbot], queue=False
+        ).then(stream_ai, chatbot, auto_outputs)
         next_btn.click(on_next_stage, chatbot, chatbot)
         refresh_all_btn.click(
             lambda: (
