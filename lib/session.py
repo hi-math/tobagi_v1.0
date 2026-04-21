@@ -189,6 +189,102 @@ class CollaborativeSession:
             summary += "\n" + " / ".join(quiet_hints)
         return summary
 
+    def _recent_ai_speakers(self, n):
+        """최근 n턴의 AI 발화자 리스트(시간순)를 ai_1/ai_2/ai_3 키로 반환."""
+        names_to_id = {
+            self.config["personas"]["ai_students"][aid]["name"]: aid
+            for aid in self.AI_KEYS
+        }
+        out = []
+        for m in self.conversation[-n:]:
+            aid = m.get("agent_id")
+            if not aid:
+                aid = names_to_id.get(m.get("speaker", ""))
+            if aid in self.AI_KEYS:
+                out.append(aid)
+        return out
+
+    def _enforce_rotation_guard(self, decision):
+        """LLM이 반환한 speaking_agents를 rotation HARD 규칙으로 후처리.
+
+        규칙:
+          HARD-2 : 최근 6턴에서 서연이 2회 이하 & 이번 턴 미포함 & 침묵턴 아님 → 서연 강제 추가
+          HARD-3 : 최근 3턴 중 2회 이상 발화한 AI가 이번 턴에 포함되어 있으면 제외
+          HARD-B : 최근 3턴이 민준·연우 핑퐁이고 이번 턴이 민준/연우만이면 서연 강제 포함
+
+        침묵 유도 턴(decision.silence_trigger=True)은 예외 — 단일 AI 선제 발화이므로
+        로테이션 개입 없이 통과시킨다.
+        """
+        # 침묵 턴은 건드리지 않는다
+        if decision.get("silence_trigger"):
+            return
+
+        speakers_in = list(decision.get("speaking_agents") or [])
+        speakers = list(speakers_in)
+        recent_all = self._recent_ai_speakers(6)
+        recent3 = self._recent_ai_speakers(3)
+        print(f"       · [rotation-guard] LLM speakers={speakers_in} recent3={recent3} "
+              f"ai_2_count_6={recent_all.count('ai_2')}")
+
+        def has_directive(aid):
+            return decision.get(f"{aid}_directive") is not None
+
+        def ensure_sooyeon_directive():
+            if not decision.get("ai_2_directive"):
+                decision["ai_2_directive"] = {
+                    "role": "진행자 + 되짚기",
+                    "speech_goal": "지금까지 나온 학습자의 용어·핵심어를 학습자 언어 그대로 짧게 묶어 확인한다",
+                    "must_include": "학습자가 방금 쓴 핵심어 + 확인 질문 1개",
+                    "must_avoid": "정답·정의 단정, 새 개념 도입, 두 개 이상의 질문",
+                }
+
+        # HARD-3: 최근 3턴에 2회 이상 발화한 AI는 이번 턴에서 제외
+        for aid in list(speakers):
+            if recent3.count(aid) >= 2:
+                speakers.remove(aid)
+                # directive도 무효화 (LLM이 생성한 것을 버림)
+                decision[f"{aid}_directive"] = None
+
+        # HARD-B: 최근 3턴이 민준·연우만으로 구성된 핑퐁 + 이번 턴도 민준·연우뿐
+        only_12 = recent3 and all(a in ("ai_1", "ai_3") for a in recent3) and len(recent3) >= 2
+        current_only_12 = speakers and all(a in ("ai_1", "ai_3") for a in speakers)
+        if only_12 and current_only_12 and "ai_2" not in speakers:
+            # 둘 중 최근에 더 많이 말한 쪽을 서연으로 교체
+            counts3 = {a: recent3.count(a) for a in ("ai_1", "ai_3")}
+            victim = max(counts3, key=counts3.get) if counts3 else None
+            if victim and victim in speakers:
+                speakers.remove(victim)
+                decision[f"{victim}_directive"] = None
+            speakers.append("ai_2")
+            ensure_sooyeon_directive()
+
+        # HARD-2: 서연이 최근 6턴 중 2회 이하 & 이번 턴 미포함 → 강제 추가
+        if recent_all.count("ai_2") <= 2 and "ai_2" not in speakers:
+            # 이미 두 명이 잡혔다면 덜 최근에 더 많이 말한 쪽을 서연으로 교체
+            if len(speakers) >= 2:
+                counts6 = {a: recent_all.count(a) for a in speakers}
+                victim = max(counts6, key=counts6.get) if counts6 else speakers[-1]
+                speakers.remove(victim)
+                decision[f"{victim}_directive"] = None
+            speakers.append("ai_2")
+            ensure_sooyeon_directive()
+
+        # 중복 제거 + 순서 보존
+        seen = set()
+        deduped = []
+        for a in speakers:
+            if a not in seen:
+                seen.add(a)
+                deduped.append(a)
+        decision["speaking_agents"] = deduped
+
+        # directive 정합성: speaking_agents에 없는 AI의 directive는 None
+        for aid in self.AI_KEYS:
+            if aid not in deduped:
+                decision[f"{aid}_directive"] = None
+        if deduped != speakers_in:
+            print(f"       · [rotation-guard] 교정: {speakers_in} → {deduped}")
+
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
 
@@ -398,6 +494,7 @@ class CollaborativeSession:
                 aid for aid in self.AI_KEYS
                 if decision.get(f"{aid}_directive")
             ]
+        self._enforce_rotation_guard(decision)
         self.last_tutor_decision = decision
         return decision
 
@@ -521,6 +618,7 @@ class CollaborativeSession:
             decision["speaking_agents"] = [
                 aid for aid in self.AI_KEYS if decision.get(f"{aid}_directive")
             ]
+        self._enforce_rotation_guard(decision)
         self.last_tutor_decision = decision
         return {"analysis": analysis, "decision": decision}
 
@@ -741,6 +839,8 @@ class CollaborativeSession:
         return False
 
     def stage_intro_utterance(self, opener_key="ai_1"):
+        # opener: 기본은 민준(ai_1). gradio_app에서는 Stage 2부터 서연(ai_2)을 명시 지정함.
+        # 의도적으로 opener를 바꾸면 각 Stage 시작 지점에서 발화자가 다양해진다.
         persona = self.config["personas"]["ai_students"][opener_key]
         stage = self.current_stage_info()
         prompt = render_prompt(self.prompts["stage_intro"], {
@@ -759,3 +859,11 @@ class CollaborativeSession:
             "stage": self.current_stage,
         })
         return text
+
+
+# ============================================================
+# 파일 끝 — mount sync 강제 플러시용 여분 주석
+# 이 파일은 CollaborativeSession 클래스만 export한다.
+# 수정 후 bash에서 AST parse 시 truncation이 보이면 이 구역을 한 줄 추가/삭제해
+# Windows 쪽 flush를 유도하자.
+# ============================================================
