@@ -38,28 +38,7 @@ def _sentence_count(text: str) -> int:
 
 
 def sanitize_ai_output(text: str) -> str:
-    """AI 발화 응답에서 메타-추론/헤더 프리픽스를 제거.
-
-    Haiku 등 일부 모델은 프롬프트 제약을 어기고 다음 같은 누출을 함께 출력한다:
-      ```
-      민준
-      AI 학생 발화 생성
-      현재 상황 분석:
-      * 침묵 트리거: true
-      * user_mode: collaborator
-      발화
-      어디가 헷갈려?
-      ```
-    이 함수는 그런 누출 줄을 걷어내고 실제 대사만 남긴다.
-
-    전략:
-      1) 전체를 코드펜스로 감쌌으면 펜스 제거
-      2) "발화" / "Utterance" / "응답" / "대사" 같은 라벨이 단독 줄로 나오면
-         그 뒤 첫 비어있지 않은 블록만 채택
-      3) 마크다운 헤더(`#`, `##`), 메타 bullet(`* key:`, `- key:`, `**굵게:**`),
-         학생 이름 단독 줄 제거
-      4) 앞뒤 공백·따옴표 trim
-    """
+    """AI 발화 응답에서 메타-추론/헤더 프리픽스를 제거."""
     import re
 
     if not text:
@@ -67,16 +46,13 @@ def sanitize_ai_output(text: str) -> str:
 
     t = text.strip()
 
-    # (1) 전체 코드펜스 감쌈 벗기기
     if t.startswith("```") and t.endswith("```"):
         inner = t[3:-3].strip()
-        # 첫 줄이 언어 지정이면 제거
         first_nl = inner.find("\n")
         if first_nl != -1 and " " not in inner[:first_nl] and "=" not in inner[:first_nl]:
             inner = inner[first_nl+1:].strip()
         t = inner
 
-    # (2) "발화" 등 라벨이 단독 줄로 있으면 그 뒤만 채택
     label_pat = re.compile(
         r"^\s*(?:발화|발\s*화|Utterance|utterance|대사|응답|output|Output|OUTPUT|final|Final)\s*[:：]?\s*$",
         re.MULTILINE,
@@ -85,7 +61,6 @@ def sanitize_ai_output(text: str) -> str:
     if matches:
         t = t[matches[-1].end():].strip()
 
-    # (3) 줄 단위 필터링
     student_names = ("민준", "서연", "연우")
     kept = []
     for ln in t.split("\n"):
@@ -93,46 +68,32 @@ def sanitize_ai_output(text: str) -> str:
         if not stripped:
             kept.append(ln)
             continue
-        # 마크다운 헤더
         if re.match(r"^#{1,6}\s", stripped):
             continue
-        # 학생 이름만 단독으로 있는 줄
         if stripped in student_names:
             continue
-        # 메타 bullet: `* key: value` 또는 `- key: value` (콜론이 앞쪽에 있음)
         m = re.match(r"^[\*\-\u2022]\s+\**([^:：\n]{1,25})[:：]", stripped)
         if m:
             continue
-        # "현재 상황 분석:", "분석:", "추론:" 같은 단독 라벨 라인
         if re.match(r"^\**(현재\s*상황\s*분석|분석|reasoning|추론|상황)\**\s*[:：]\s*$", stripped):
             continue
-        # "## xxx" 같은 굵게 섹션 헤더도 제거
         if re.match(r"^\*\*[^*]{1,30}\*\*\s*$", stripped):
             continue
         kept.append(ln)
     t = "\n".join(kept).strip()
 
-    # (4) 라벨 재처리 (앞의 필터링 후 "발화" 등이 첫 줄로 드러날 수 있음)
     matches = list(label_pat.finditer(t))
     if matches:
         t = t[matches[-1].end():].strip()
 
-    # (5) 앞/뒤 감싸는 큰따옴표 벗기기
     if len(t) >= 2 and t[0] in ('"', '"', "「") and t[-1] in ('"', '"', "」"):
         t = t[1:-1].strip()
 
-    # (6) 여전히 비었다면 원본 반환 (안전장치)
     return t or text.strip()
 
 
 def detect_user_mode(user_utterance: str) -> str:
-    """사용자가 설명자(teacher) 모드인지 협력자(collaborator) 모드인지 감지.
-
-    기준:
-    - 문장이 3개 이상이면서
-    - 설명/정당화 키워드(때문에·왜냐하면·정의 등)를 포함하면 teacher
-    - 아니면 collaborator
-    """
+    """사용자가 설명자(teacher) 모드인지 협력자(collaborator) 모드인지 감지."""
     if not user_utterance:
         return "collaborator"
     if _sentence_count(user_utterance) >= TEACHER_MODE_MIN_SENTENCES:
@@ -168,13 +129,7 @@ class CollaborativeSession:
         return "\n".join(f"[{m['speaker']}]: {m['content']}" for m in recent) or "(아직 대화 없음)"
 
     def speaker_frequency(self, n=8):
-        """최근 n턴의 AI별 발화 횟수 + 마지막 발화 기준 턴 간격을 요약한다.
-
-        예: "최근 8턴 중 민준 3 · 서연 0 · 연우 4 · 사용자 1
-             · 서연 마지막 발화 이후 8턴 경과(오래 침묵)".
-
-        LLM이 스스로 speaking_agents 편중을 감지해 rotation하도록 단서를 준다.
-        """
+        """최근 n턴의 AI별 발화 횟수 + 마지막 발화 기준 턴 간격을 요약한다."""
         recent = self.conversation[-n:] if n and n > 0 else self.conversation
         names = {
             "ai_1": self.config["personas"]["ai_students"]["ai_1"]["name"],
@@ -182,7 +137,6 @@ class CollaborativeSession:
             "ai_3": self.config["personas"]["ai_students"]["ai_3"]["name"],
         }
         count = {"ai_1": 0, "ai_2": 0, "ai_3": 0, "user": 0}
-        # 각 AI가 "몇 턴 전에 마지막으로 말했는지" 계산 (없으면 None)
         last_gap = {"ai_1": None, "ai_2": None, "ai_3": None}
         total = len(self.conversation)
         for i, m in enumerate(self.conversation):
@@ -217,7 +171,6 @@ class CollaborativeSession:
             f"{names['ai_3']}(ai_3) {count['ai_3']}회",
             f"사용자 {count['user']}회",
         ]
-        # 가장 오래 쉰 AI를 하이라이트
         never_spoken = [a for a, g in last_gap.items() if g is None]
         quiet_hints = []
         if never_spoken:
@@ -487,8 +440,6 @@ class CollaborativeSession:
             silence_trigger=silence_trigger,
             user_silence_seconds=user_silence_seconds,
         )
-        # max_tokens: 학생 발화는 2~4문장 제한이므로 220이면 충분.
-        # 400 → 220으로 낮춰 tail latency 단축.
         raw = self.api.call(prompt, max_tokens=220, temperature=0.9)
         return sanitize_ai_output(raw)
 
@@ -516,13 +467,10 @@ class CollaborativeSession:
             "user_silence_seconds": "0",
             "last_silence_trigger_agent": self.last_silence_agent or "(없음)",
             "user_mode_hint": self.current_user_mode,
-            # 최근 AI별 발화 분포 — speaking_agents 편중 방지 근거로 LLM에 전달
             "speaker_frequency": self.speaker_frequency(8),
             "domain_knowledge": self._domain_text(),
         })
         try:
-            # analyze+decide 통합 JSON은 보통 450~650 토큰으로 수렴.
-            # 900 → 700으로 추가 다이어트 — 첫 AI 토큰이 뜨기까지 대기를 더 줄인다.
             raw = self.api.call(prompt, max_tokens=700, temperature=0.4)
             merged = extract_json(raw)
         except Exception as e:
@@ -650,13 +598,7 @@ class CollaborativeSession:
 
     def stream_ai_turns_tokens(self, user_utterance, decision, silence_trigger=False,
                                user_silence_seconds=0.0):
-        """발화할 AI들을 병렬로 스트리밍 호출하고, 토큰이 도착할 때마다 이벤트 yield.
-
-        Yields:
-            ("start",  aid, "")       — 첫 청크 직전
-            ("update", aid, chunk)    — 토큰 델타 (누적 아닌 증분)
-            ("done",   aid, full)     — 해당 AI 발화 완료 (conversation에 기록 직후)
-        """
+        """발화할 AI들을 병렬로 스트리밍 호출하고, 토큰이 도착할 때마다 이벤트 yield."""
         ai_students = self.config["personas"]["ai_students"]
         speaking = decision.get("speaking_agents", []) or []
         targets = [
@@ -681,8 +623,6 @@ class CollaborativeSession:
             started = False
             buf = []
             try:
-                # 스트리밍 워커: 400 → 220으로 낮춰 발화 전체가 빨리 끝나도록.
-                # (Haiku는 TTFT보다 tail 토큰 수가 체감 레이턴시를 더 좌우함)
                 stream = self.api.call(
                     prompt, max_tokens=220, temperature=0.9, stream=True,
                 )
@@ -792,7 +732,6 @@ class CollaborativeSession:
         })
         self.last_silence_agent = aid
         # AI가 선제 발화한 시점을 "사용자 발화"로 간주해 타이머를 완전 리셋.
-        # 이로써 다음 nudge도 동일하게 SILENCE_THRESHOLD_SECONDS(=60s) 이상 침묵해야 발생.
         self.last_user_utterance_ts = time.time()
         return {"agent_id": aid, "text": text, "decision": decision}
 
@@ -815,7 +754,6 @@ class CollaborativeSession:
             "my_persona": persona,
             "domain_knowledge": self._domain_text(),
         })
-        # stage intro도 짧은 오프닝 발화 → 180이면 충분.
         raw = self.api.call(prompt, max_tokens=180, temperature=0.8)
         text = sanitize_ai_output(raw)
         self.conversation.append({
