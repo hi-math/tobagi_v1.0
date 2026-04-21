@@ -317,7 +317,6 @@ class CollaborativeSession:
         tm = self.config["tutor_model"]["tutor_model"]
         prompt = render_prompt(self.prompts["tutor_decision"], {
             "learning_objectives": self.task["learning_objectives"],
-            "current_stage_full": stage,
             "user_learner_model": self._lm_summary(self.learner_models["user"]),
             "ai_1_learner_model": self._lm_summary(self.learner_models["ai_1"]),
             "ai_2_learner_model": self._lm_summary(self.learner_models["ai_2"]),
@@ -326,12 +325,7 @@ class CollaborativeSession:
             "user_silence_seconds": f"{user_silence_seconds:.0f}",
             "last_silence_trigger_agent": self.last_silence_agent or "(없음)",
             "user_mode_hint": user_mode,
-            "tutor_principles": tm["pedagogical_principles"],
-            "role_pool": tm["ai_student_role_assignment"]["role_pool"],
-            "silence_prompt_policy": tm.get("silence_prompt_policy", {}),
-            "user_as_teacher_policy": tm.get("user_as_teacher_policy", {}),
             "speaker_frequency": self.speaker_frequency(8),
-            "domain_knowledge": self._domain_text(),
         })
         try:
             raw = self.api.call(prompt, max_tokens=900, temperature=0.5)
@@ -411,11 +405,21 @@ class CollaborativeSession:
                          user_mode="collaborator", silence_trigger=False,
                          user_silence_seconds=0.0):
         persona = self.config["personas"]["ai_students"][student_key]
+        # 발화 생성엔 말투·역할·성격만 필요. initial_self_efficacy/initial_learner_state는 제외
+        # (실시간 learner_state는 별도 주입되므로 중복 토큰 낭비).
+        persona_slim = {
+            "name": persona.get("name"),
+            "level": persona.get("level"),
+            "role": persona.get("role"),
+            "description": persona.get("description"),
+            "traits": persona.get("traits", {}),
+            "speech_style": persona.get("speech_style"),
+        }
         stage = self.current_stage_info()
         directive = directive or {}
         return render_prompt(self.prompts["ai_student"], {
             "student_name": persona["name"],
-            "my_persona": persona,
+            "my_persona": persona_slim,
             "my_learner_state": self._flatten_lm(self.learner_models[student_key]),
             "stage_title": stage["title"],
             "stage_prompt": stage["prompt"],
@@ -428,7 +432,6 @@ class CollaborativeSession:
             "user_silence_seconds": f"{user_silence_seconds:.0f}",
             "recent_dialogue": self.recent_dialogue(8),
             "user_utterance": user_utterance,
-            "domain_knowledge": self._domain_text(),
         })
 
     def generate_ai_utterance(self, student_key, directive, user_utterance,
@@ -450,7 +453,6 @@ class CollaborativeSession:
             "task_title": self.task["task_title"],
             "stage_title": stage["title"],
             "core_question": stage["core_question"],
-            "current_stage_full": stage,
             "user_utterance": user_utterance,
             "recent_dialogue": self.recent_dialogue(8),
             "user_learner_model": self._lm_summary(self.learner_models["user"]),
@@ -460,15 +462,10 @@ class CollaborativeSession:
             "stage_rubric": stage.get("assessment_rubric", "(해당 Stage 루브릭 없음)"),
             "stage_checklist": stage.get("ai_checklist", "(해당 Stage 체크리스트 없음)"),
             "learning_objectives": self.task["learning_objectives"],
-            "tutor_principles": tm["pedagogical_principles"],
-            "role_pool": tm["ai_student_role_assignment"]["role_pool"],
-            "silence_prompt_policy": tm.get("silence_prompt_policy", {}),
-            "user_as_teacher_policy": tm.get("user_as_teacher_policy", {}),
             "user_silence_seconds": "0",
             "last_silence_trigger_agent": self.last_silence_agent or "(없음)",
             "user_mode_hint": self.current_user_mode,
             "speaker_frequency": self.speaker_frequency(8),
-            "domain_knowledge": self._domain_text(),
         })
         try:
             raw = self.api.call(prompt, max_tokens=700, temperature=0.4)

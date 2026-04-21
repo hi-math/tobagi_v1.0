@@ -16,8 +16,6 @@
 {{task_title}} — {{stage_title}}
 핵심 질문: {{core_question}}
 
-**Stage 전체 정보:** {{current_stage_full}}
-
 **사용자 이번 발화:**
 "{{user_utterance}}"
 
@@ -33,10 +31,6 @@
 **Stage 체크리스트:** {{stage_checklist}}
 
 **수업 목표:** {{learning_objectives}}
-**교수자 원칙:** {{tutor_principles}}
-**역할 풀:** {{role_pool}}
-**침묵 정책:** {{silence_prompt_policy}}
-**학습자-교수자화 정책:** {{user_as_teacher_policy}}
 
 **사용자 침묵 시간(초):** {{user_silence_seconds}}
 **마지막 침묵 유도 담당 AI:** {{last_silence_trigger_agent}}
@@ -45,16 +39,13 @@
 **최근 AI별 발화 분포 (rotation 근거):**
 {{speaker_frequency}}
 
-**도메인 지식(교과서·정의·예시·반례, 발췌):**
-{{domain_knowledge}}
-
 ---
 
 ## Part 1: 학습자 분석 지침
 
 ### `task_achievement`
 - 현재 Stage 루브릭/체크리스트를 기준으로 `stage_level`(A~E)을 판정
-- 도메인 지식과 대조해 개념적 정확성 판단
+- 소수/합성수·약수 개념의 수학적 정확성은 네 사전지식으로 판단
 - 한 발화로 등급을 크게 움직이지 않음 (인접 등급 이내)
 - 오개념 드러나면 `misconception_changes.added`에 추가; 해소 명시 근거 있으면 `removed`
 
@@ -89,7 +80,7 @@
 6. **AI 간 대화** 허용 (연우 → 민준 질문 등)
 7. **한 턴 발화 수**: 0~2명
 8. **stage_complete** 판정 (`completion_criteria` 참고)
-9. `must_include`에 도메인 지식의 구체 자료(숫자·정의·반례) 녹이기 지시
+9. `must_include`에 구체 숫자/예시(예: 6의 약수 1,2,3,6 / 에라토스테네스의 체 / 49=7×7 / 1의 특수성)를 녹이되, 그대로 읊지 말고 대화에 자연스럽게 섞도록 지시
 10. **speaker rotation (중요)**: 위의 `{{speaker_frequency}}`를 반드시 확인해 세 AI의 발화 분포를 의식적으로 고르게 만든다.
     - 최근 8턴에서 **0회 발화**인 AI가 있다면 이번 턴 `speaking_agents`에 포함 우선.
     - 특히 **서연(ai_2, 진행자)** 은 실험에서 과소 발화되기 쉬우므로 다음 중 하나만 해당하면 배정한다:

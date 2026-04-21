@@ -1,10 +1,6 @@
-"""Gradio 채팅 인터페이스 (V5 + 문장 단위 버블 분할, rev-b).
+"""Gradio 채팅 인터페이스 (V5, 1 발화 = 1 버블).
 
-왼쪽 패널: Chatbot(발화자별 컬러 버블) + 입력 / 오른쪽 탭: 레이더 · 변화 추이 · 학습자모델 · 교수자 Decision
-
-* gradio 는 launch_ui() 실행 시점에 지연 임포트한다. 덕분에 gradio 미설치
-  환경에서도 team4 패키지 전체는 정상 임포트된다 (CLI 런너나 config 로더만
-  쓰는 경우).
+왼쪽 패널: Chatbot(발화자별 컬러 버블) + 입력 / 오른쪽 탭: 레이더 · 학습자모델 · 변화 추이 · 교수자 Decision · 오개념 · CPS
 """
 
 import json
@@ -20,13 +16,10 @@ from .visualize import (
 
 
 def launch_ui(*, config, prompts, learner_models, api, share=True):
-    """협력학습 세션을 Gradio Blocks UI로 기동."""
     import gradio as gr
 
     session = CollaborativeSession(config, prompts, learner_models, api)
 
-    # on_submit 진행 중에는 침묵 타이머가 chatbot을 덮어쓰지 못하도록 가드.
-    # 리스트로 감싼 이유는 클로저 내부에서 재할당 없이 상태를 바꾸기 위함.
     _streaming_flag = [False]
     n1 = config["personas"]["ai_students"]["ai_1"]["name"]
     n2 = config["personas"]["ai_students"]["ai_2"]["name"]
@@ -54,49 +47,10 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             f'</div>'
         )
 
-    def _split_paragraphs(text):
-        """AI 발화를 '채팅 같은' 여러 버블로 쪼갠다."""
-        import re
-        text = (text or "").strip()
-        if not text:
-            return [""]
-
-        if "\n\n" in text:
-            paras = [p.strip() for p in text.split("\n\n") if p.strip()]
-            if len(paras) >= 2:
-                return paras
-
-        pattern = re.compile(r'(?<=[\.!\?~…])["\'\)\]\}」』]?\s+(?=\S)')
-        candidate_splits = []
-        pos = 0
-        for m in pattern.finditer(text):
-            end = m.end()
-            if end < len(text) and text[end].isdigit():
-                continue
-            candidate_splits.append((pos, m.start() + 1))
-            pos = end
-
-        if pos < len(text):
-            candidate_splits.append((pos, len(text)))
-
-        parts = [text[s:e].strip() for (s, e) in candidate_splits if text[s:e].strip()]
-        merged = []
-        for p in parts:
-            if merged and len(p) < 5:
-                merged[-1] = (merged[-1] + " " + p).strip()
-            else:
-                merged.append(p)
-        return merged if merged else [text]
-
     def _bubble_messages(aid, name, text):
-        parts = _split_paragraphs(text)
-        out = []
-        for i, p in enumerate(parts):
-            out.append({
-                "role": "assistant",
-                "content": _bubble(aid, name, p, show_name=(i == 0)),
-            })
-        return out
+        """한 AI의 1회 발화를 1개 버블로 렌더 (1 발화 = 1 버블 원칙)."""
+        text = (text or "").strip()
+        return [{"role": "assistant", "content": _bubble(aid, name, text, show_name=True)}]
 
     def _system_bubble(text):
         return (
@@ -183,7 +137,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             return [{"role": "assistant", "content": err_html}]
 
     def _rebuild_chat_from_session():
-        """페이지 새로고침 시 session.conversation 기반으로 채팅을 재구성."""
         if not session.conversation:
             return _initial_history()
 
@@ -263,7 +216,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             slot = {}
             buf = {}
             done_payloads = {}
-            CURSOR = "▍"
+            CURSOR = "\u258d"
 
             THROTTLE_CHARS = 6
             last_yield_len = {}
@@ -297,14 +250,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     }
                     yield _chat_only(history, clear_msg=False)
 
-            for aid in sorted(slot.keys(), key=lambda a: slot[a], reverse=True):
-                text = done_payloads.get(aid, "")
-                msgs = _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
-                if len(msgs) <= 1:
-                    continue
-                history[slot[aid]] = msgs[0]
-                for m in reversed(msgs[1:]):
-                    history.insert(slot[aid] + 1, m)
+            # 1 발화 = 1 버블 - 스트리밍 중 슬롯 1개에 전문이 이미 채워졌다.
 
             if decision.get("stage_complete"):
                 history.append({"role": "assistant",
@@ -401,8 +347,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         gr.Button("갱신").click(_misconception_timeline, outputs=misc_plot)
                     with gr.Tab("⑥ CPS 히트맵"):
                         gr.Markdown(
-                            "_Stage × CPS 하위구인(공동이해·행동·조직화·수정) 매트릭스. "
-                            "각 stage에서 어떤 협력 행동이 많이 관찰됐는지 색 진하기로 표시._"
+                            "_Stage × CPS 하위구인(공동이해·행동·조직화·수정) 매트릭스._"
                         )
                         cps_plot = gr.Plot(label="CPS 히트맵")
                         gr.Button("갱신").click(_cps_heatmap, outputs=cps_plot)
@@ -424,7 +369,9 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
             outputs=[radar, hist_plot, model_md, dec_code, misc_plot, cps_plot],
         )
 
-        silence_timer = gr.Timer(value=15.0, active=True)
+        # 침묵 타이머: 120s. 프롬프트 다이어트 이후에도 토큰 예산 아끼려 폴링 주기는 길게.
+        # 침묵 임계치(SILENCE_THRESHOLD_SECONDS=60)는 session.py에서 별도 판정.
+        silence_timer = gr.Timer(value=120.0, active=True)
         silence_timer.tick(on_silence_tick, inputs=chatbot, outputs=chatbot)
 
         demo.load(_rebuild_chat_from_session, outputs=chatbot)
