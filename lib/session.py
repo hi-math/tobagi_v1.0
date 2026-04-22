@@ -644,19 +644,60 @@ class CollaborativeSession:
             "user_mode_hint": self.current_user_mode,
             "speaker_frequency": self.speaker_frequency(6),
         })
-        # flash-lite로 라우팅: 분석은 저렴·빠른 모델로 충분. 출력 토큰도 700→400.
+        # flash-lite로 라우팅 + JSON 모드 강제 + 30초 타임아웃.
         # provider=gemini면 flash-lite, anthropic이면 Haiku 유지.
         fast_model = None
+        use_json_mode = False
         if getattr(self.api, "provider", None) == "gemini":
             fast_model = DEFAULT_GEMINI_FLASH_LITE
+            use_json_mode = True  # Gemini response_mime_type=application/json 강제
+
+        def _invoke():
+            return self.api.call(prompt, max_tokens=400, temperature=0.4,
+                                 model=fast_model, json_mode=use_json_mode)
+
+        t0 = time.time()
+        raw = None
         try:
-            raw = self.api.call(prompt, max_tokens=400, temperature=0.4, model=fast_model)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(_invoke)
+                raw = fut.result(timeout=30)
+            dt = time.time() - t0
+            print(f"       · analyze_and_decide 응답 {dt:.1f}s (model={fast_model or self.api.model})")
             merged = extract_json(raw)
         except Exception as e:
-            print(f"  ⚠️ 통합 분석/결정 실패: {e} — 폴백 분리 호출")
-            analysis = self.analyze_user_utterance(user_utterance)
-            decision = self.tutor_decision(user_silence_seconds=0.0,
-                                           user_mode=self.current_user_mode)
+            dt = time.time() - t0
+            print(f"  ⚠️ 통합 분석/결정 실패({dt:.1f}s): {e} — 기본 결정으로 대체 (fallback 호출 생략)")
+            # fallback 경로는 API 2회 더 호출 → 레이턴시 지옥. 그 대신 최소 결정을 즉석 구성해
+            # UI가 100초 내에 반드시 움직이게 한다.
+            analysis = {
+                "updates": [], "misconception_changes": {"added": [], "removed": []},
+                "observation_summary": "(분석 타임아웃 — 기본 결정 사용)",
+            }
+            last_ai = None
+            for m in reversed(self.conversation[-6:]):
+                if m.get("agent_id") in self.AI_KEYS:
+                    last_ai = m.get("agent_id")
+                    break
+            rotation = {"ai_1": "ai_2", "ai_2": "ai_3", "ai_3": "ai_1"}
+            next_aid = rotation.get(last_ai, "ai_1")
+            decision = {
+                "diagnosis": "분석 타임아웃",
+                "user_mode": self.current_user_mode,
+                "silence_trigger": False,
+                "speaking_agents": [next_aid],
+                f"{next_aid}_directive": {
+                    "role": "호응자",
+                    "speech_goal": "사용자 발화에 짧게 반응하며 질문을 하나 던진다",
+                    "must_include": "한 문장 + 짧은 질문",
+                    "must_avoid": "긴 설명, 정답 제시",
+                },
+                "stage_complete": False,
+                "strategy": "타임아웃 기본",
+            }
+            self._enforce_rotation_guard(decision)
+            self._stage_complete_safety_net(decision, user_utterance)
+            self.last_tutor_decision = decision
             return {"analysis": analysis, "decision": decision}
 
         analysis = merged.get("analysis") or {}

@@ -50,7 +50,10 @@ class ClaudeAPI:
         self.client = client
         self.model = model
 
-    def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False):
+    def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False,
+             json_mode=False):
+        # ClaudeAPI는 json_mode 인자를 무시 (Anthropic은 JSON 모드가 별도 필요 없음).
+        _ = json_mode
         use_model = model or self.model
         if stream:
             return self._call_stream(prompt, max_tokens, temperature, use_model)
@@ -103,12 +106,18 @@ class GeminiAPI:
             self._model_cache[name] = self._genai.GenerativeModel(name)
         return self._model_cache[name]
 
-    def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False):
+    def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False,
+             json_mode=False):
+        """json_mode=True면 response_mime_type='application/json'을 강제해 Gemini가
+        JSON 블록만 반환하도록 제한한다. extract_json 실패로 fallback 경로가 타는
+        것을 막아 레이턴시가 크게 줄어든다."""
         use_model = model or self.model
         gen_config = {
             "max_output_tokens": max_tokens,
             "temperature": temperature,
         }
+        if json_mode:
+            gen_config["response_mime_type"] = "application/json"
         gm = self._get_model(use_model)
         if stream:
             return self._call_stream(gm, prompt, gen_config)
