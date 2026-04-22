@@ -13,7 +13,11 @@ import time
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .llm_api import extract_json, render_prompt, DEFAULT_HAIKU, DEFAULT_SONNET
+from .llm_api import (
+    extract_json, render_prompt,
+    DEFAULT_HAIKU, DEFAULT_SONNET,
+    DEFAULT_GEMINI_FLASH, DEFAULT_GEMINI_FLASH_LITE, DEFAULT_GEMINI_25,
+)
 
 # 프롬프트에 삽입할 도메인 지식 최대 문자 수 (전체를 통째로 넣지 않고 상단만)
 DOMAIN_TRUNCATE_CHARS = 2500
@@ -400,9 +404,15 @@ class CollaborativeSession:
             "stage_rubric": stage.get("assessment_rubric", "(해당 Stage 루브릭 없음)"),
             "stage_checklist": stage.get("ai_checklist", "(해당 Stage 체크리스트 없음)"),
         })
+        # provider별 분석용 경량 모델: Gemini는 flash-lite, Anthropic은 Haiku
+        fast_model = None
+        if getattr(self.api, "provider", None) == "gemini":
+            fast_model = DEFAULT_GEMINI_FLASH_LITE
+        elif getattr(self.api, "provider", None) == "anthropic":
+            fast_model = DEFAULT_HAIKU
         try:
-            raw = self.api.call(prompt, max_tokens=800, temperature=0.3,
-                                model=DEFAULT_HAIKU)
+            raw = self.api.call(prompt, max_tokens=500, temperature=0.3,
+                                model=fast_model)
             result = extract_json(raw)
         except Exception as e:
             print(f"  ⚠️ 학습자 분석 실패: {e}")
@@ -485,8 +495,14 @@ class CollaborativeSession:
             "user_mode_hint": user_mode,
             "speaker_frequency": self.speaker_frequency(8),
         })
+        # provider별 경량 모델 라우팅 (legacy fallback 경로도 동일하게 다이어트)
+        fast_model = None
+        if getattr(self.api, "provider", None) == "gemini":
+            fast_model = DEFAULT_GEMINI_FLASH_LITE
+        elif getattr(self.api, "provider", None) == "anthropic":
+            fast_model = DEFAULT_HAIKU
         try:
-            raw = self.api.call(prompt, max_tokens=900, temperature=0.5)
+            raw = self.api.call(prompt, max_tokens=500, temperature=0.5, model=fast_model)
             decision = extract_json(raw)
         except Exception as e:
             print(f"  ⚠️ 교수자 의사결정 실패: {e}")
@@ -608,26 +624,33 @@ class CollaborativeSession:
     def analyze_and_decide(self, user_utterance):
         stage = self.current_stage_info()
         tm = self.config["tutor_model"]["tutor_model"]
+        # 레이턴시 다이어트: ai 학생 학습자모델은 분석에 불필요 → 프롬프트에서 생략.
+        #                 대화 히스토리도 8→4 턴으로 축소. 입력 토큰 ~40% 감소.
         prompt = render_prompt(self.prompts["analyze_and_decide"], {
             "task_title": self.task["task_title"],
             "stage_title": stage["title"],
             "core_question": stage["core_question"],
             "user_utterance": user_utterance,
-            "recent_dialogue": self.recent_dialogue(8),
+            "recent_dialogue": self.recent_dialogue(4),
             "user_learner_model": self._lm_summary(self.learner_models["user"]),
-            "ai_1_learner_model": self._lm_summary(self.learner_models["ai_1"]),
-            "ai_2_learner_model": self._lm_summary(self.learner_models["ai_2"]),
-            "ai_3_learner_model": self._lm_summary(self.learner_models["ai_3"]),
+            "ai_1_learner_model": "(생략)",
+            "ai_2_learner_model": "(생략)",
+            "ai_3_learner_model": "(생략)",
             "stage_rubric": stage.get("assessment_rubric", "(해당 Stage 루브릭 없음)"),
             "stage_checklist": stage.get("ai_checklist", "(해당 Stage 체크리스트 없음)"),
             "learning_objectives": self.task["learning_objectives"],
             "user_silence_seconds": "0",
             "last_silence_trigger_agent": self.last_silence_agent or "(없음)",
             "user_mode_hint": self.current_user_mode,
-            "speaker_frequency": self.speaker_frequency(8),
+            "speaker_frequency": self.speaker_frequency(6),
         })
+        # flash-lite로 라우팅: 분석은 저렴·빠른 모델로 충분. 출력 토큰도 700→400.
+        # provider=gemini면 flash-lite, anthropic이면 Haiku 유지.
+        fast_model = None
+        if getattr(self.api, "provider", None) == "gemini":
+            fast_model = DEFAULT_GEMINI_FLASH_LITE
         try:
-            raw = self.api.call(prompt, max_tokens=700, temperature=0.4)
+            raw = self.api.call(prompt, max_tokens=400, temperature=0.4, model=fast_model)
             merged = extract_json(raw)
         except Exception as e:
             print(f"  ⚠️ 통합 분석/결정 실패: {e} — 폴백 분리 호출")

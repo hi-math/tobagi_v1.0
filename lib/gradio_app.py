@@ -199,12 +199,23 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
         _streaming_flag[0] = True
         try:
+            # 레이턴시 완충: 분석 API가 돌아가는 동안 사용자가 화면을 내내
+            # 멍하게 보지 않도록 "분석 중..." placeholder를 즉시 띄운다.
+            # prep 완료 후 이 placeholder는 제거되고 실제 AI 발화가 그 자리에서 시작된다.
+            thinking_slot = len(history)
+            history.append({"role": "assistant",
+                            "content": _system_bubble("_AI 학생들이 대화를 곱씹고 있어요..._")})
+            yield _chat_only(history, clear_msg=False)
+
             try:
                 prep = session.user_turn_prep(msg)
             except Exception as e:
-                history = history + [{"role": "assistant", "content": f"오류: {e}"}]
+                history[thinking_slot] = {"role": "assistant", "content": f"오류: {e}"}
                 yield _refresh_bundle(history, clear_msg=False)
                 return
+
+            # placeholder 제거 (분석 완료 → 실제 발화로 교체 시작)
+            history.pop(thinking_slot)
 
             decision = prep["decision"]
 
