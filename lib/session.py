@@ -145,7 +145,11 @@ def _is_incomplete_utterance(s: str) -> bool:
 
     규칙:
       - 빈 문자열 또는 strip 후 20자 미만 → incomplete
-      - 한글 종결 어미·문장부호로 끝나지 않으면 incomplete ("둘이" "수가" 등 조사·체언 종결 감지)
+      - 문장 부호(. ! ? …)로 끝나면 완결로 신뢰
+      - 그 외에는 **다중 음절 종결패턴**만 완결로 인정 (단일 한글 음절은 모호해서 제외)
+        · '어'는 '어때/어떨까/어떻게' 시작 / '자'는 '자기/자신' 시작 등, 단일 음절 종결은
+          절단된 다음 음절과 구분 불가능해 false negative 빈발.
+        · 예: "숫자 7은 어" → 완결 아님 (다음에 '어때?'가 올 수도).
 
     Gemini의 RECITATION 조기 종료로 인한 잘림 케이스 대응.
     """
@@ -154,17 +158,33 @@ def _is_incomplete_utterance(s: str) -> bool:
     stripped = s.strip().rstrip('"\'」』')
     if len(stripped) < 20:
         return True
-    terminators = (
-        ".", "!", "?", "…",
-        # 한글 문장 종결 어미 (평서/의문/청유/감탄)
-        "야", "어", "지", "까", "래", "네", "해", "자",
-        "다", "니", "아", "요", "나",
-        # 축약 동사 종결형 (예: 헷갈려, 봐줘, 잘 돼, 보면 돼)
-        "려", "줘", "봐", "돼", "와", "게",
-        # 결합형
-        "볼까", "할래", "어때", "있지", "맞아", "같아", "헷갈려", "모르겠어",
+    # 1) 명시적 문장부호 종결 → 완결
+    if stripped[-1] in ".!?…":
+        return False
+
+    # 2) 다중 음절 한국어 종결 패턴만 완결로 인정 (2~4글자 확실한 패턴)
+    multi_char_terminators = (
+        # 의문·청유
+        "어때", "어떨까", "어떨래", "어떡해",
+        "볼까", "할까", "할래", "할거야", "해볼까", "해볼래",
+        # 선언·동의
+        "있어", "있지", "있네", "있다", "있으니",
+        "맞아", "맞지", "맞네", "맞다",
+        "같아", "같지", "같네", "같다",
+        "잖아", "잖니", "지요", "이야", "이야",
+        # 축약 동사
+        "헷갈려", "모르겠어", "알겠어", "알아", "알지",
+        "생각해", "이해했어", "됐어", "괜찮아",
+        "해봐", "봐봐", "봐줘", "해줘", "알려줘",
+        # 격식체
+        "습니다", "입니다", "해요", "어요", "네요", "죠", "군요",
     )
-    return not any(stripped.endswith(t) for t in terminators)
+    if any(stripped.endswith(t) for t in multi_char_terminators):
+        return False
+
+    # 3) 이 외에는 단일 한글 음절/조사 종결 → 모호 → incomplete 취급
+    #    (정상 종결인데도 재시도하는 false-positive는 비용이 적으므로 수용)
+    return True
 
 
 class CollaborativeSession:
@@ -453,6 +473,54 @@ class CollaborativeSession:
             decision["stage_complete"] = True
             print(f"       · [stage-guard] 완료 기준 충족 감지 → stage_complete=true "
                   f"(reason: {hit_reason})")
+
+    def _apply_stage_gate(self, decision, user_utterance):
+        """Stage 완료 2단계 게이트: 조건 충족 → 서연 확인 질문 → 사용자 승인.
+
+        - pending 상태에서 사용자가 consent면 실제 advance, reject면 pending 해제
+        - 조건이 이번 턴에 처음 충족되면 pending으로 전환하고 서연 단독 확인 질문 directive 주입
+        - pending 2턴 경과하면 자동 해제 (stuck 방지)
+
+        main flow·fallback 양쪽에서 호출되어야 함.
+        """
+        consent = _detect_stage_advance_consent(user_utterance)
+        if self.pending_stage_complete:
+            if consent == "consent":
+                print(f"       · [stage-gate] 사용자 승인 감지 → stage_complete=True 확정")
+                decision["stage_complete"] = True
+                self.pending_stage_complete = False
+                self.pending_stage_complete_since_turn = None
+            elif consent == "reject":
+                print(f"       · [stage-gate] 사용자 거부 감지 → pending 해제, Stage 유지")
+                decision["stage_complete"] = False
+                self.pending_stage_complete = False
+                self.pending_stage_complete_since_turn = None
+            else:
+                held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
+                if held_turns >= 2:
+                    print(f"       · [stage-gate] pending 2턴 경과 → 해제, Stage 유지")
+                    self.pending_stage_complete = False
+                    self.pending_stage_complete_since_turn = None
+                decision["stage_complete"] = False  # pending 중엔 advance 막음
+        elif decision.get("stage_complete"):
+            # 최초로 완료 조건 충족 감지 → 승인 질문 모드로 전환
+            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 — 서연 확인 질문 삽입")
+            self.pending_stage_complete = True
+            self.pending_stage_complete_since_turn = self.turn_count
+            decision["stage_complete"] = False  # 바로 advance 막기
+            # 서연(ai_2) 혼자 발화하도록 강제 + 확인 directive 주입
+            decision["speaking_agents"] = ["ai_2"]
+            decision["ai_1_directive"] = None
+            decision["ai_3_directive"] = None
+            decision["ai_2_directive"] = {
+                "role": "진행자 (Stage 완료 승인 확인)",
+                "speech_goal": (
+                    "지금까지 사용자가 한 설명을 한 줄로 짧게 요약해 재진술한 뒤, "
+                    "'이렇게 이해하고 다음 단계로 넘어가도 될까?' 라고 분명하게 승인을 묻는다."
+                ),
+                "must_include": "사용자가 방금 말한 핵심 표현을 그대로 짧게 인용 + 승인 질문 (예: '~ 이렇게 정리해도 돼? 다음으로 넘어가도 될까?')",
+                "must_avoid": "새로운 개념 도입, 긴 설명, 두 개 이상의 질문",
+            }
 
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
@@ -861,6 +929,8 @@ class CollaborativeSession:
             }
             self._enforce_rotation_guard(decision)
             self._stage_complete_safety_net(decision, user_utterance)
+            # fallback 경로에서도 2단계 게이트 적용 (조건 충족 시 바로 advance 방지)
+            self._apply_stage_gate(decision, user_utterance)
             self.last_tutor_decision = decision
             return {"analysis": analysis, "decision": decision}
 
@@ -913,48 +983,7 @@ class CollaborativeSession:
         self._stage_complete_safety_net(decision, user_utterance)
 
         # --- Stage 완료 2단계 게이트 (승인 확인) ---
-        # 1) 이미 pending 상태라면 사용자 발화에서 승인/거부 판정
-        # 2) pending이 아닌데 이번 턴에 stage_complete=True가 떴다면, 실제 advance는 막고
-        #    서연(ai_2)에게 확인 질문 directive를 주어 사용자에게 물어본다.
-        consent = _detect_stage_advance_consent(user_utterance)
-        if self.pending_stage_complete:
-            if consent == "consent":
-                print(f"       · [stage-gate] 사용자 승인 감지 → stage_complete=True 확정")
-                decision["stage_complete"] = True
-                self.pending_stage_complete = False
-                self.pending_stage_complete_since_turn = None
-            elif consent == "reject":
-                print(f"       · [stage-gate] 사용자 거부 감지 → pending 해제, Stage 유지")
-                decision["stage_complete"] = False
-                self.pending_stage_complete = False
-                self.pending_stage_complete_since_turn = None
-            else:
-                # 사용자가 다른 내용 계속 설명 중 → 2턴 이상 지속되면 pending 해제
-                held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
-                if held_turns >= 2:
-                    print(f"       · [stage-gate] pending 2턴 경과 → 해제, Stage 유지")
-                    self.pending_stage_complete = False
-                    self.pending_stage_complete_since_turn = None
-                decision["stage_complete"] = False  # pending 중엔 advance 막음
-        elif decision.get("stage_complete"):
-            # 최초로 완료 조건 충족 감지 → 승인 질문 모드로 전환
-            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 — 서연 확인 질문 삽입")
-            self.pending_stage_complete = True
-            self.pending_stage_complete_since_turn = self.turn_count
-            decision["stage_complete"] = False  # 바로 advance 막기
-            # 서연(ai_2) 혼자 발화하도록 강제 + 확인 directive 주입
-            decision["speaking_agents"] = ["ai_2"]
-            decision["ai_1_directive"] = None
-            decision["ai_3_directive"] = None
-            decision["ai_2_directive"] = {
-                "role": "진행자 (Stage 완료 승인 확인)",
-                "speech_goal": (
-                    "지금까지 사용자가 한 설명을 한 줄로 짧게 요약해 재진술한 뒤, "
-                    "'이렇게 이해하고 다음 단계로 넘어가도 될까?' 라고 분명하게 승인을 묻는다."
-                ),
-                "must_include": "사용자가 방금 말한 핵심 표현을 그대로 짧게 인용 + 승인 질문 (예: '~ 이렇게 정리해도 돼? 다음으로 넘어가도 될까?')",
-                "must_avoid": "새로운 개념 도입, 긴 설명, 두 개 이상의 질문",
-            }
+        self._apply_stage_gate(decision, user_utterance)
 
         # --- CPS 태그 반영 (analyze_and_decide가 piggyback으로 태깅) ---
         cps_tags_raw = analysis.get("cps_tags") or []
@@ -1269,17 +1298,8 @@ class CollaborativeSession:
         persona = self.config["personas"]["ai_students"][opener_key]
         stage = self.current_stage_info()
 
-        # 교사 주도 intro_message가 정의되어 있으면, 학생 대화의 문맥에 정의를
-        # 공식화해 전달한다. (Stage 2 시작 시 소수·합성수 정의 제시용)
-        intro_msg = stage.get("intro_message")
-        if intro_msg:
-            self.conversation.append({
-                "speaker": "📘 수업 안내",
-                "content": intro_msg,
-                "stage": self.current_stage,
-                "system": True,
-            })
-
+        # 교사 주도 intro_message는 gradio_app이 별도 system 버블로 렌더링한다
+        # (session.conversation에는 append하지 않음 — UI 전용 메시지).
         prompt = render_prompt(self.prompts["stage_intro"], {
             "opener_name": persona["name"],
             "stage_title": stage["title"],
@@ -1331,10 +1351,16 @@ class CollaborativeSession:
             "content": text,
             "stage": self.current_stage,
         })
-        # intro_message가 있으면 함께 반환 (UI에서 두 버블로 렌더링 가능)
-        if intro_msg:
-            return f"[📘 수업 안내]\n{intro_msg}\n\n---\n\n{text}"
+        # **AI opener만 반환**한다. intro_message는 별도 system 버블로 이미
+        # self.conversation에 append되어 있고, gradio_app이 별도 렌더링한다.
         return text
+
+    def pop_pending_intro_message(self):
+        """gradio_app에서 stage_intro_utterance 호출 직후 이 메서드로 system 버블을
+        꺼내 별도 UI 버블로 렌더링한다. 반환: intro_message 문자열 또는 None.
+        """
+        stage = self.current_stage_info()
+        return stage.get("intro_message")
 
 
 # ============================================================

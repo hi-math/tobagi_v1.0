@@ -47,7 +47,7 @@ def print_user_model(config, learner_models):
 
 
 # --------------------------------------------------------------------
-# 레이더 차트
+# 영역 요약 (인지/정의 분리 수평 바 차트)
 # --------------------------------------------------------------------
 
 def _aggregate_model_score(mk, model_def, user_models_inst):
@@ -112,45 +112,90 @@ def _aggregate_model_score(mk, model_def, user_models_inst):
     return sum(vals) / len(vals) if vals else None
 
 
-def radar_figure(config, learner_models):
-    """사용자의 학습자 모델을 **최상위 모델 4개** 스케일로 축약해 레이더로 표시.
+def _bar_panel(ax, labels, values, *, title, palette, label_color):
+    """한 카테고리(인지/정의) 수평 바 차트 서브플롯 렌더."""
+    if not labels:
+        ax.axis("off")
+        ax.text(0.5, 0.5, "(모델 없음)", ha="center", va="center",
+                fontsize=11, color="#999", transform=ax.transAxes)
+        ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+        return
 
-    축: task_achievement / math_communication / cps / self_efficacy
-    하위 차원은 학습자 모델 패널에서 따로 본다.
+    y_pos = list(range(len(labels)))
+    colors = palette[:len(labels)] if len(palette) >= len(labels) else (
+        palette + [palette[-1]] * (len(labels) - len(palette))
+    )
+    bars = ax.barh(y_pos, values, color=colors, height=0.55, edgecolor="white", linewidth=1.5)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(labels, fontsize=11, fontweight="bold")
+    ax.set_xlim(0, 5.3)
+    ax.set_xticks([0, 1, 2, 3, 4, 5])
+    ax.set_xlabel("점수 (1~5)", fontsize=10)
+    ax.set_title(title, fontsize=13, fontweight="bold", pad=12)
+    ax.invert_yaxis()      # 첫 항목을 맨 위
+    ax.grid(axis="x", alpha=0.3, linestyle="--")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    # 각 바 끝에 점수 숫자 + 5점 만점 배경 윤곽
+    for bar, v in zip(bars, values):
+        # 5점 만점 윤곽 (연한 회색)
+        ax.barh(bar.get_y() + bar.get_height()/2, 5, color="#EEE", height=bar.get_height(),
+                zorder=0)
+        if v > 0:
+            ax.text(v + 0.12, bar.get_y() + bar.get_height()/2,
+                    f"{v:.1f}", va="center", ha="left",
+                    fontsize=11, fontweight="bold", color=label_color)
+        else:
+            ax.text(0.12, bar.get_y() + bar.get_height()/2,
+                    "—", va="center", ha="left",
+                    fontsize=10, color="#AAA")
+
+
+def radar_figure(config, learner_models):
+    """사용자 학습자 모델을 **인지요소·정의요소 분리 수평 바 차트**로 표시.
+
+    - 왼쪽 패널: 인지적 요소 (task_achievement, math_communication)
+    - 오른쪽 패널: 정의적 요소 (cps, self_efficacy)
+    - 각 영역은 1~5 스케일 정규화 점수. 하위 차원은 학습자 모델 패널에서 확인.
     """
     schema = config["learner_model_schema"]["models"]
+    categories = config["learner_model_schema"].get("categories", {})
     user_models = learner_models["user"]["models"]
 
-    labels, vals = [], []
-    for mk, mv in schema.items():
-        score = _aggregate_model_score(mk, mv, user_models)
-        labels.append(mv.get("name", mk))
-        # 데이터 없음은 0으로 표시 (축이 비면 차트가 깨지므로)
-        vals.append(score if score is not None else 0.0)
+    # 카테고리별 모델 키 추출 (schema에 실제 존재하는 것만)
+    cog_keys = [mk for mk in categories.get("cognitive", {}).get("models", [])
+                if mk in schema]
+    aff_keys = [mk for mk in categories.get("affective", {}).get("models", [])
+                if mk in schema]
 
-    N = len(labels)
-    angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
-    angles += angles[:1]
-    vals_plot = vals + vals[:1]
+    def _scores_for(keys):
+        labels, vals = [], []
+        for mk in keys:
+            mv = schema[mk]
+            score = _aggregate_model_score(mk, mv, user_models)
+            labels.append(mv.get("name", mk))
+            vals.append(score if score is not None else 0.0)
+        return labels, vals
 
-    fig, ax = plt.subplots(figsize=(7, 7), subplot_kw=dict(polar=True))
-    ax.plot(angles, vals_plot, "o-", linewidth=2.5, color="#E74C3C")
-    ax.fill(angles, vals_plot, alpha=0.22, color="#E74C3C")
+    cog_labels, cog_vals = _scores_for(cog_keys)
+    aff_labels, aff_vals = _scores_for(aff_keys)
 
-    # 각 꼭짓점에 점수 숫자 표시 (시각적 피드백 강화)
-    for ang, lb, v in zip(angles[:-1], labels, vals):
-        if v > 0:
-            ax.text(ang, v + 0.25, f"{v:.1f}", ha="center", va="center",
-                    fontsize=10, fontweight="bold", color="#C0392B")
+    fig, (ax_cog, ax_aff) = plt.subplots(1, 2, figsize=(12, 4.5))
 
-    ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, size=11, fontweight="bold")
-    ax.set_ylim(0, 5)
-    ax.set_yticks([1, 2, 3, 4, 5])
-    ax.set_yticklabels(["1", "2", "3", "4", "5"], size=8, color="#888")
-    ax.set_title("사용자 학습자 모델 — 4개 영역 (하위요소는 패널 참고)",
-                 size=12, pad=22, fontweight="bold")
-    ax.grid(True, alpha=0.4)
+    _bar_panel(ax_cog, cog_labels, cog_vals,
+               title="🧠 인지적 요소 (Cognitive)",
+               palette=["#2C7FB8", "#41B6C4", "#1F618D", "#154360"],
+               label_color="#154360")
+    _bar_panel(ax_aff, aff_labels, aff_vals,
+               title="💫 정의적 요소 (Affective)",
+               palette=["#E67E22", "#D35400", "#A04000", "#6E2C00"],
+               label_color="#6E2C00")
+
+    name = learner_models["user"].get("student_name", "사용자")
+    fig.suptitle(f"{name} 학습자 모델 — 4개 영역 요약 (하위요소는 학습자 모델 패널 참고)",
+                 fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
     return fig
 

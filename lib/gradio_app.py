@@ -270,6 +270,11 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     s = session.current_stage_info()
                     history.append({"role": "assistant",
                                     "content": _stage_card(session.current_stage, s)})
+                    # 새 Stage에 intro_message가 있으면 system 버블로 먼저 렌더링
+                    intro_msg = s.get("intro_message")
+                    if intro_msg:
+                        history.append({"role": "assistant",
+                                        "content": _system_bubble(f"📘 **수업 안내**\n\n{intro_msg}")})
                     yield _chat_only(history, clear_msg=False)
                     intro = session.stage_intro_utterance("ai_2")
                     history.extend(_bubble_messages("ai_2", n2, intro))
@@ -333,9 +338,9 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
 
             with gr.Column(scale=2):
                 with gr.Tabs():
-                    with gr.Tab("① 레이더"):
-                        gr.Markdown("_학습자 모델의 주요 요소를 방사형 그래프로 한눈에 조감합니다._")
-                        radar = gr.Plot(label="사용자 레이더")
+                    with gr.Tab("① 영역 요약"):
+                        gr.Markdown("_인지·정의 두 카테고리의 최상위 점수를 바 차트로 조감합니다. 하위 차원은 학습자 모델 탭에서 확인하세요._")
+                        radar = gr.Plot(label="사용자 영역 요약 (인지/정의)")
                         gr.Button("갱신").click(_radar, outputs=radar)
                     with gr.Tab("② 학습자 모델"):
                         gr.Markdown("_인지/정의 카테고리별 하위요소 점수와 루브릭 해석입니다._")
