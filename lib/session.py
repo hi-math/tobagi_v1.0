@@ -375,16 +375,17 @@ class CollaborativeSession:
             speakers.append("ai_2")
             ensure_sooyeon_directive()
 
-        # HARD-2: 서연이 최근 6턴 중 2회 이하 & 이번 턴 미포함 → 강제 추가
-        if recent_all.count("ai_2") <= 2 and "ai_2" not in speakers:
-            # 이미 두 명이 잡혔다면 덜 최근에 더 많이 말한 쪽을 서연으로 교체
-            if len(speakers) >= 2:
-                counts6 = {a: recent_all.count(a) for a in speakers}
-                victim = max(counts6, key=counts6.get) if counts6 else speakers[-1]
-                speakers.remove(victim)
-                decision[f"{victim}_directive"] = None
-            speakers.append("ai_2")
-            ensure_sooyeon_directive()
+        # HARD-2 (완화): 서연이 **최근 6턴에 한 번도 발화 안 했고**, 이번 턴도 미포함일 때만
+        # 강제 추가. 기존의 "2회 이하 → 강제"는 서연 반복 투입의 주범이라 완전 폐기.
+        # 최근 3턴에 이미 서연이 있었다면 절대 추가하지 않는다 (반복 정리 차단).
+        if (recent_all.count("ai_2") == 0
+                and "ai_2" not in recent3
+                and "ai_2" not in speakers):
+            # 이미 두 명이 잡혔어도 교체하지는 않음 — 서연이 오랫동안 말 못 했을 때만
+            # "끼워넣기" 정도로 제한. 과도한 교체는 다른 AI의 역할도 방해.
+            if len(speakers) == 0:
+                speakers.append("ai_2")
+                ensure_sooyeon_directive()
 
         # 중복 제거 + 순서 보존
         seen = set()
@@ -438,8 +439,21 @@ class CollaborativeSession:
         tags = {a: _tag(r) for a, r in roles.items()}
         tagset = set(tags.values())
 
-        # main + comp 조합이면 2명 유지 허용
+        # main + comp 조합이면 2명 유지 — **단, comp 반복 방지 조건 있음**
         if "main" in tagset and "comp" in tagset and len(speakers) == 2:
+            # 최근 2턴에 이미 comp 역할 발화가 있었다면 이번 턴에서 comp 제외
+            # (서연 정리 반복 차단 — "지금까지 얘기한 거 정리해볼게" 연타 방지)
+            recent2 = self._recent_ai_speakers(2)
+            if recent2:
+                # 최근 2턴 중 comp성 AI가 있었는지 휴리스틱 판단:
+                # 서연(ai_2)이 최근 2턴 안에 발화했으면 comp 역할로 연속 투입 안 함
+                if "ai_2" in recent2 and any(tags.get(a) == "comp" and a == "ai_2" for a in speakers):
+                    dropped_aid = "ai_2"
+                    decision[f"{dropped_aid}_directive"] = None
+                    speakers = [a for a in speakers if a != dropped_aid]
+                    decision["speaking_agents"] = speakers
+                    print(f"       · [single-speaker-cap] comp 반복 방지 — 서연 최근 2턴 내 이미 발화 → 제외")
+                    return
             return
 
         # 그 외: 1명으로 축소. keeper 선정 우선순위:
