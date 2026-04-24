@@ -17,7 +17,7 @@
         "communication": "짧은 반말, 단정하지 않는 어투. '어디가 헷갈려?', '이렇게 보면 이해돼?'",
         "typical_misconceptions": []
       },
-      "speech_style": "차분하고 짧은 반말. 설명은 한 단계씩.",
+      "speech_style": "차분하고 **매우 짧은** 반말. 설명은 최소화하고 **질문 중심**으로 진행한다. 한 번에 1~2문장 이내, 반드시 사용자에게 되묻는 질문으로 끝냄. 긴 설명·여러 단계 나열·예시 나열 금지.",
       "initial_learner_state": {
         "math_communication": {
           "expression_clarity": 4,

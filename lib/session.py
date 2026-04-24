@@ -475,12 +475,14 @@ class CollaborativeSession:
               f"(tags={tags}, dropped={dropped})")
 
     def _stage_complete_safety_net(self, decision, user_utterance):
-        """LLM이 stage_complete=false로 내려도, 학습자 발화(+최근 합산)가
-        명백히 완료 기준을 만족하면 true로 덮어쓴다.
+        """Stage 완료 판정.
 
-        현재 Stage의 번호에 따라 키워드 세트를 검사한다.
-        - Stage 1: 경로 A(약수 개수) 또는 경로 B(나눗셈 표현) 판정
-        - Stage 2: 31·37·41·43·47 중 4개 이상 등장 + 판정 근거 단서
+        **주 경로**: tasks.json의 `stage_complete_required` 목록에 지정된
+        필수 체크포인트 ID가 사용자 progress에 **모두 hit**되어 있으면 완료.
+
+        **보조 경로** (체크포인트 업데이트가 늦은 경우 대비): 사용자 최근 발화
+        키워드로 직접 검사. 보수적으로 — 각 체크포인트의 핵심 내용이
+        명시적으로 발화에 등장해야 인정.
         """
         if decision.get("stage_complete"):
             return  # 이미 true면 그대로 둠
@@ -494,84 +496,61 @@ class CollaborativeSession:
                 break
         combined = " ".join(recent_user)
 
-        stage = self.current_stage
+        stage_num = self.current_stage
+        stage_info = self.current_stage_info()
         hit_reason = None
 
-        if stage == 1:
-            # 관대한 통과 기준: 아래 세 경로 중 **하나만** 언급해도 통과.
-            has_div = "약수" in combined
+        # === 주 경로: stage_complete_required 전부 hit 됐는지 progress에서 확인 ===
+        required = stage_info.get("stage_complete_required") or []
+        if required:
+            user_prog = (
+                (self.learner_models.get("user", {}).get("checkpoint_progress") or {})
+                .get(str(stage_num)) or {}
+            )
+            hit_ids = [cid for cid in required
+                       if user_prog.get(cid, {}).get("hit")]
+            missing = [cid for cid in required if cid not in hit_ids]
+            print(f"       · [stage-guard] required={required} hit={hit_ids} missing={missing}")
+            if not missing:
+                hit_reason = f"stage_complete_required 전부 hit ({required})"
 
-            # 경로 A: 약수가 2개 (소수 쪽 단서)
-            path_a = has_div and any(k in combined for k in [
-                "약수가 2개", "약수가 2 개", "약수가 두개", "약수가 두 개",
-                "약수 2개", "약수 두개", "2개야", "두개야",
-                "정확히 2개", "딱 2개", "딱 두개",
+        # === 보조 경로: 발화 키워드 — progress 업데이트 늦을 때만 활용 ===
+        # 단, 주 경로가 미완료여도 여기서 자동 완료시키지는 않고 진단 목적으로만 로그.
+        if not hit_reason and stage_num == 1:
+            # s1-2: "약수 2개" 또는 "1과 자기자신만"
+            s12 = any(k in combined for k in [
+                "약수가 2개", "약수 2개", "약수 두개", "약수가 두 개",
+                "1과 자기자신", "1과 본인", "1과 자신",
             ])
-            if path_a:
-                hit_reason = "경로A(약수 2개)"
-
-            # 경로 B: 1과 자기 자신만 약수 (소수 정의)
-            path_b = any(k in combined for k in [
-                "1과 자기 자신", "1이랑 자기 자신", "1과 자신",
-                "1, 자기 자신", "1이랑 자기자신", "1과 본인",
-                "자기 자신만", "자기자신만",
+            # s1-3: "약수 3개 이상"
+            s13 = any(k in combined for k in [
+                "약수가 3개", "3개 이상", "약수 여러 개", "다른 약수도",
             ])
-            if path_b and not hit_reason:
-                hit_reason = "경로B(1과 자기자신 정의)"
-
-            # 경로 C: 약수가 3개 이상 (합성수 쪽 단서)
-            path_c = has_div and any(k in combined for k in [
-                "3개 이상", "3 개 이상", "세개 이상", "세 개 이상",
-                "2개보다 많", "두개보다 많", "약수가 많",
-                "4개", "5개", "6개",
+            # s1-5: "1은 소수도 합성수도 아님"
+            s15 = any(k in combined for k in [
+                "1은 소수도 합성수도 아니", "1은 둘 다 아니",
+                "1은 소수 아니", "1은 합성수 아니", "1은 예외",
             ])
-            if path_c and not hit_reason:
-                hit_reason = "경로C(약수 3개 이상)"
+            print(f"       · [stage-guard s1 키워드] s1-2={s12} s1-3={s13} s1-5={s15}")
 
-            # 경로 D: 1·자기자신 외 다른 수로도 나눠진다 (합성수 쪽 단서)
-            path_d = any(k in combined for k in [
-                "다른 수로", "다른 약수", "1과 자기자신 이외",
-                "1과 자기 자신 이외", "본인 이외", "자기자신 이외",
-                "2로도", "3으로도", "다른 수도",
-            ])
-            if path_d and not hit_reason:
-                hit_reason = "경로D(1·자기자신 외 약수 존재)"
-
-        elif stage == 2:
-            # 범위 20~30으로 교체. 정답: 23, 29 (둘 다 필요)
+        elif not hit_reason and stage_num == 2:
             has_23 = "23" in combined
             has_29 = "29" in combined
-            # 합성수 오답 포함 여부 — 하나라도 있으면 아직 미완료로 간주
-            composites = ["20", "21", "22", "24", "25", "26", "27", "28", "30"]
-            has_wrong = False
-            for c in composites:
-                # "23"을 "25"로 오판한 경우는 has_29 체크로 잡힘. 여기선
-                # 명시적으로 "<c>는 소수" 류 표현을 추적.
-                if f"{c}은 소수" in combined or f"{c}는 소수" in combined or f"{c}이 소수" in combined:
-                    has_wrong = True
-                    break
-            if has_23 and has_29 and not has_wrong:
-                hit_reason = "Stage2 소수 23·29 둘 다 정확"
+            others_covered = any(k in combined for k in [
+                "나머지는 합성수", "나머지가 합성수", "다른 건 합성수",
+                "다른건 합성수", "다른 수는 합성수", "이외는 합성수",
+            ])
+            print(f"       · [stage-guard s2 키워드] 23={has_23} 29={has_29} 나머지={others_covered}")
 
-        elif stage == 3:
-            # Stage 3: 12 + 13 = 25. 정답 25가 나오거나 (12와 13) 모두 등장 → 완료.
+        elif not hit_reason and stage_num == 3:
             has_12 = "12" in combined
             has_13 = "13" in combined
-            has_25 = any(k in combined for k in ["25", "이십오"])
-            # "합은 25"나 "답은 25" 같은 명시적 계산도 체크
-            explicit_sum = any(k in combined for k in [
-                "합은 25", "합이 25", "답은 25", "답이 25",
-                "12 + 13", "12+13", "12더하기 13", "12 더하기 13",
-            ])
-            if explicit_sum:
-                hit_reason = "Stage3 12+13=25 명시적 계산"
-            elif has_12 and has_13 and has_25:
-                hit_reason = "Stage3 12·13·25 모두 등장"
+            has_25 = "25" in combined
+            print(f"       · [stage-guard s3 키워드] 12={has_12} 13={has_13} 25={has_25}")
 
         if hit_reason:
             decision["stage_complete"] = True
-            print(f"       · [stage-guard] 완료 기준 충족 감지 → stage_complete=true "
-                  f"(reason: {hit_reason})")
+            print(f"       · [stage-guard] 완료 기준 충족 → stage_complete=true (reason: {hit_reason})")
 
     def _apply_user_addressed_override(self, decision, user_utterance):
         """사용자가 특정 AI를 명시적으로 지목했다면 그 AI 단독 발화로 강제.
