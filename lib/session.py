@@ -188,18 +188,18 @@ def _is_incomplete_utterance(s: str) -> bool:
     """AI 발화가 중간에 잘렸는지 휴리스틱 판정.
 
     규칙:
-      - 빈 문자열 또는 strip 후 20자 미만 → incomplete
+      - 빈 문자열 또는 5자 미만 → incomplete (정말 짧은 garbled만 잡음)
       - **말줄임표(... 또는 …)로 끝나면 incomplete** (truncation 표시)
       - 단일 문장부호(. ! ?)로 끝나면 완결
       - 그 외에는 다중 음절 종결패턴만 완결로 인정 (단일 한글 음절은 모호)
 
-    Gemini RECITATION·max_tokens 잘림 시 LLM이 "..." 로 마무리하는 패턴 다수.
-    이걸 종결로 잘못 보면 retry 발동 안 함 → 잘린 채 사용자에게 전달.
+    민준 페르소나가 "매우 짧게 (1~2문장)"로 운용되므로 11~19자 짧은 응답
+    ('어디 막혔어?', '음, 약수부터.')이 정상. 20자 minimum은 너무 빡빡해서 5로 완화.
     """
     if not s:
         return True
     stripped = s.strip().rstrip('"\'」』')
-    if len(stripped) < 20:
+    if len(stripped) < 5:
         return True
     # 1) 말줄임표 종결 → **incomplete** (가장 먼저 체크, 단일 . 보다 우선)
     if stripped.endswith("...") or stripped.endswith("…"):
@@ -1068,10 +1068,15 @@ class CollaborativeSession:
             if best is None:
                 partial = text3 or text2 or text or ""
                 trimmed = _trim_to_last_complete_sentence(partial) if partial else ""
-                if trimmed and len(trimmed) >= 20:
+                if trimmed and len(trimmed) >= 5:
                     best = trimmed
+                elif partial and len(partial.strip()) >= 5:
+                    # 트림은 실패해도 partial이 5자 이상이면 그대로 사용
+                    best = partial.strip().rstrip("…").rstrip(".").rstrip()
+                    if best and best[-1] not in ".!?":
+                        best = best + "?"
                 else:
-                    # 트림 실패 또는 빈 응답 — 페르소나별 generic
+                    # 정말 짧거나 빈 응답 — 페르소나별 generic
                     generic = {
                         "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
                         "ai_2": "잠깐, 지금까지 얘기한 거 정리해볼래?",
@@ -1487,8 +1492,15 @@ class CollaborativeSession:
                         # "..." 마커는 UX에 혼란이라 절대 부착하지 않음.
                         partial = full3 or full2 or full or ""
                         trimmed = _trim_to_last_complete_sentence(partial) if partial else ""
-                        if trimmed and len(trimmed) >= 20:
+                        # 최소 길이 5자 — "어디 막혔어?" 같은 짧은 정상 응답도 통과
+                        if trimmed and len(trimmed) >= 5:
                             best = trimmed
+                        elif partial and len(partial.strip()) >= 5:
+                            # 트림은 실패했지만 partial이 5자 이상 있으면 그대로 사용
+                            # (말줄임표 등 부적절한 문자만 제거)
+                            best = partial.strip().rstrip("…").rstrip(".").rstrip()
+                            if best and best[-1] not in ".!?":
+                                best = best + "?"
                         else:
                             # 트림 결과 너무 짧거나 빈 응답 — 페르소나별 generic 질문
                             generic_by_aid = {
