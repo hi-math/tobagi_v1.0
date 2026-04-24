@@ -245,10 +245,8 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                 yield _refresh_bundle(history, clear_msg=False)
                 return  # 이번 턴 AI 발화 생성 완전 스킵
 
-            if prep["user_mode"] == "teacher":
-                history = history + [{"role": "assistant",
-                                      "content": _system_bubble("_사용자가 설명자(교수자) 모드로 감지되었습니다. AI 학생들은 학습자 모드로 짧게 반응합니다._")}]
-                yield _chat_only(history, clear_msg=False)
+            # user_mode == "teacher" 감지는 directive에 반영되지만 UI 안내문은 표시 안 함
+            # (사용자가 교수자 모드 전환을 의식하지 않고 자연스럽게 진행하도록)
 
             slot = {}
             buf = {}

@@ -660,6 +660,34 @@ class CollaborativeSession:
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
 
+    def _keyword_match_checkpoints(self, user_utterance, stage):
+        """사용자 발화에 detection_hints 키워드가 등장하면 그 체크포인트 hit.
+
+        LLM이 hit 판정을 놓치는 경우 안전장치. 단순 substring 매칭이지만
+        체크포인트의 detection_hints가 `["약수", "23은 소수"]` 식으로 명시돼
+        있어 false positive 위험 낮음.
+
+        반환: hit된 cp_id 리스트 (중복 제거).
+        """
+        if not user_utterance:
+            return []
+        text = user_utterance
+        hit_ids = []
+        for cp in stage.get("checkpoints") or []:
+            cid = cp.get("id")
+            for hint in cp.get("detection_hints") or []:
+                if hint and hint in text:
+                    hit_ids.append(cid)
+                    break  # 한 cp 안에서 여러 hint 매칭해도 1번만 추가
+        # 중복 제거 + 순서 보존
+        seen = set()
+        out = []
+        for cid in hit_ids:
+            if cid not in seen:
+                seen.add(cid)
+                out.append(cid)
+        return out
+
     def _format_stage_checkpoints(self, stage):
         """analyze_and_decide 프롬프트에 주입할 체크포인트 목록 문자열 생성.
 
@@ -1281,17 +1309,29 @@ class CollaborativeSession:
 
         # --- 체크포인트 적용 + AI 전파 ---
         # 방어적 파싱: LLM이 analysis 안이 아닌 top-level에 올리는 경우도 있음
-        checkpoint_hits = (
+        llm_hits = (
             analysis.get("checkpoint_hits")
             or merged.get("checkpoint_hits")
             or []
         )
         # 문자열 단일 반환 대응 (예: "s1-1")
-        if isinstance(checkpoint_hits, str):
-            checkpoint_hits = [checkpoint_hits]
+        if isinstance(llm_hits, str):
+            llm_hits = [llm_hits]
         # id 정규화 (공백 제거)
-        checkpoint_hits = [str(h).strip() for h in checkpoint_hits if h]
-        print(f"       · [checkpoint raw] {checkpoint_hits}")
+        llm_hits = [str(h).strip() for h in llm_hits if h]
+
+        # 코드 측 키워드 매칭으로 LLM 누락 보강
+        keyword_hits = self._keyword_match_checkpoints(user_utterance, stage)
+
+        # 합집합 (순서: LLM 우선 + keyword 추가분)
+        seen = set(llm_hits)
+        checkpoint_hits = list(llm_hits)
+        for cid in keyword_hits:
+            if cid not in seen:
+                seen.add(cid)
+                checkpoint_hits.append(cid)
+
+        print(f"       · [checkpoint raw] llm={llm_hits} keyword={keyword_hits} merged={checkpoint_hits}")
         if checkpoint_hits:
             try:
                 from .learner_model import (
