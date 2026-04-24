@@ -17,6 +17,7 @@ from .llm_api import (
     extract_json, render_prompt,
     DEFAULT_HAIKU, DEFAULT_SONNET,
     DEFAULT_GEMINI_FLASH, DEFAULT_GEMINI_FLASH_LITE, DEFAULT_GEMINI_25,
+    DEFAULT_OPENAI_MINI, DEFAULT_OPENAI_FULL,
 )
 
 # 프롬프트에 삽입할 도메인 지식 최대 문자 수 (전체를 통째로 넣지 않고 상단만)
@@ -635,9 +636,12 @@ class CollaborativeSession:
         })
         # provider별 분석용 경량 모델: Gemini는 flash-lite, Anthropic은 Haiku
         fast_model = None
-        if getattr(self.api, "provider", None) == "gemini":
+        _prov = getattr(self.api, "provider", None)
+        if _prov == "openai":
+            fast_model = DEFAULT_OPENAI_MINI
+        elif _prov == "gemini":
             fast_model = DEFAULT_GEMINI_FLASH_LITE
-        elif getattr(self.api, "provider", None) == "anthropic":
+        elif _prov == "anthropic":
             fast_model = DEFAULT_HAIKU
         try:
             raw = self.api.call(prompt, max_tokens=500, temperature=0.3,
@@ -726,9 +730,12 @@ class CollaborativeSession:
         })
         # provider별 경량 모델 라우팅 (legacy fallback 경로도 동일하게 다이어트)
         fast_model = None
-        if getattr(self.api, "provider", None) == "gemini":
+        _prov = getattr(self.api, "provider", None)
+        if _prov == "openai":
+            fast_model = DEFAULT_OPENAI_MINI
+        elif _prov == "gemini":
             fast_model = DEFAULT_GEMINI_FLASH_LITE
-        elif getattr(self.api, "provider", None) == "anthropic":
+        elif _prov == "anthropic":
             fast_model = DEFAULT_HAIKU
         try:
             raw = self.api.call(prompt, max_tokens=500, temperature=0.5, model=fast_model)
@@ -890,25 +897,56 @@ class CollaborativeSession:
         raw = self.api.call(prompt, max_tokens=480, temperature=0.9)
         text = sanitize_ai_output(raw)
 
-        # 미완결이면 1회 재시도 (temperature 변경 + RECITATION 회피 지시 추가)
+        # 미완결이면 최대 2회 재시도
         if _is_incomplete_utterance(text):
-            print(f"       · [ai_utterance {student_key}] 미완결({len(text)}자, '{text[-10:] if text else ''}') — 재시도")
-            retry_note = (
-                "\n\n---\n[중요·재생성]: 직전 시도에서 응답이 중단됐다. 다음을 엄수:\n"
-                "- '단일 따옴표'나 \"이중 따옴표\"로 수학 용어(소수·합성수·약수 등)를 감싸지 말 것.\n"
-                "- 교과서 정의를 그대로 인용하지 말고 학생 말투로 풀어 쓸 것.\n"
-                "- 반드시 문장 종결 어미(~야/어/지/까/래/해 등)로 끝맺을 것.\n"
+            print(f"       · [ai_utterance {student_key}] 미완결({len(text)}자, '{text[-10:] if text else ''}') — 1차 재시도")
+            retry_note_1 = (
+                "\n\n---\n[재생성]: 직전 응답이 중단됐다. 아래를 엄수:\n"
+                "- 따옴표로 수학 용어를 감싸지 말 것.\n"
+                "- 교과서 문장을 그대로 인용하지 말고 학생 말투로 풀어쓸 것.\n"
+                "- 문장 종결 어미(~야/어/지/까/래/해)로 끝맺을 것.\n"
             )
-            raw2 = self.api.call(prompt + retry_note, max_tokens=480, temperature=1.0)
-            text2 = sanitize_ai_output(raw2)
-            if not _is_incomplete_utterance(text2) or len(text2) > len(text):
-                text = text2
-            else:
-                # 둘 다 불완전이면 그나마 긴 쪽 + 종결 어미 추가
-                if text and not _is_incomplete_utterance(text + "..."):
-                    text = text.rstrip() + "..."
+            text2 = ""
+            try:
+                raw2 = self.api.call(prompt + retry_note_1, max_tokens=480, temperature=1.0)
+                text2 = sanitize_ai_output(raw2)
+            except Exception as e:
+                print(f"       · [ai_utterance {student_key}] 1차 실패: {e}")
+
+            text3 = ""
+            if _is_incomplete_utterance(text2):
+                print(f"       · [ai_utterance {student_key}] 1차도 미완결 — 2차 재시도(용어 최소화)")
+                retry_note_2 = (
+                    "\n\n---\n[2차 재생성]: 수학 용어 최소화. 2문장 이내 짧게. "
+                    "학생 말투로 되묻는 질문 하나로 끝내기.\n"
+                )
+                try:
+                    raw3 = self.api.call(prompt + retry_note_2, max_tokens=300, temperature=1.2)
+                    text3 = sanitize_ai_output(raw3)
+                except Exception as e:
+                    print(f"       · [ai_utterance {student_key}] 2차 실패: {e}")
+
+            # 최선 선택
+            best = None
+            for cand in (text3, text2, text):
+                if cand and not _is_incomplete_utterance(cand):
+                    best = cand
+                    break
+            if best is None:
+                partial = text3 or text2 or text or ""
+                if partial:
+                    if partial.rstrip()[-1:] in ".!?…":
+                        best = partial.rstrip()
+                    else:
+                        best = partial.rstrip() + "..."
                 else:
-                    text = (text or "") + " (발화가 끊겼어요)"
+                    generic = {
+                        "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
+                        "ai_2": "잠깐, 지금까지 얘기한 거 정리해볼래?",
+                        "ai_3": "어… 나는 잘 모르겠는데, 같이 볼래?",
+                    }
+                    best = generic.get(student_key, "잠깐, 다시 볼까?")
+            text = best
         return text
 
     def analyze_and_decide(self, user_utterance):
@@ -934,13 +972,19 @@ class CollaborativeSession:
             "user_mode_hint": self.current_user_mode,
             "speaker_frequency": self.speaker_frequency(6),
         })
-        # flash-lite로 라우팅 + JSON 모드 강제 + 30초 타임아웃.
-        # provider=gemini면 flash-lite, anthropic이면 Haiku 유지.
+        # 분석용 경량 모델 + JSON 모드 강제 + 30초 타임아웃.
+        # provider별 light 모델 라우팅 + JSON mode 지원.
         fast_model = None
         use_json_mode = False
-        if getattr(self.api, "provider", None) == "gemini":
+        provider_now = getattr(self.api, "provider", None)
+        if provider_now == "openai":
+            # 4o-mini는 이미 light + JSON 모드 안정적
+            fast_model = DEFAULT_OPENAI_MINI
+            use_json_mode = True
+        elif provider_now == "gemini":
             fast_model = DEFAULT_GEMINI_FLASH_LITE
-            use_json_mode = True  # Gemini response_mime_type=application/json 강제
+            use_json_mode = True
+        # anthropic은 이미 Haiku(기본)라 오버라이드 불필요
 
         def _invoke():
             return self.api.call(prompt, max_tokens=400, temperature=0.4,
@@ -1224,37 +1268,64 @@ class CollaborativeSession:
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
 
-                # 스트림이 도중 잘린 경우(RECITATION 등) — 한 번 비스트림 재호출.
-                # 재시도 프롬프트에 명시적 RECITATION 회피 지시 추가.
+                # 스트림이 도중 잘린 경우(RECITATION 등) — 최대 2회 재시도.
+                # 1차: anti-quote/anti-교과서 지시. 2차: 완전 재구성 강제.
                 if _is_incomplete_utterance(full):
-                    print(f"       · [ai_stream {aid}] 미완결({len(full)}자, '{full[-10:] if full else ''}') — 비스트림 재시도")
-                    retry_note = (
-                        "\n\n---\n[중요·재생성]: 직전 시도에서 응답이 중단됐다. 다음을 엄수:\n"
-                        "- '단일 따옴표'나 \"이중 따옴표\"로 수학 용어(소수·합성수·약수 등)를 감싸지 말 것.\n"
-                        "- 교과서 정의를 그대로 인용하지 말고 학생 말투로 풀어 쓸 것.\n"
-                        "- 반드시 문장 종결 어미(~야/어/지/까/래/해 등)로 끝맺을 것.\n"
+                    print(f"       · [ai_stream {aid}] 미완결({len(full)}자, '{full[-10:] if full else ''}') — 1차 재시도")
+                    retry_note_1 = (
+                        "\n\n---\n[재생성]: 직전 응답이 중단됐다. 아래를 엄수:\n"
+                        "- 따옴표로 수학 용어를 감싸지 말 것.\n"
+                        "- 교과서 문장('약수가 2개인 수', '1과 자기 자신만' 등)을 그대로 인용하지 말고,\n"
+                        "  학생 말투로 풀어쓸 것. 예: '약수가 몇 개냐면 두 개야' → '나누면 1이랑 자기만 되는 수야'.\n"
+                        "- 문장 종결 어미(~야/어/지/까/래/해)로 끝맺을 것.\n"
                     )
                     full2 = ""
                     try:
-                        raw2 = self.api.call(prompt + retry_note, max_tokens=480, temperature=1.0)
+                        raw2 = self.api.call(prompt + retry_note_1, max_tokens=480, temperature=1.0)
                         full2 = sanitize_ai_output(raw2)
                     except Exception as e:
-                        print(f"       · [ai_stream {aid}] 재시도 실패: {e}")
+                        print(f"       · [ai_stream {aid}] 1차 재시도 실패: {e}")
 
-                    # 최선 선택: full2가 완결이면 무조건 full2. 아니면 더 긴 쪽.
+                    # 2차 재시도: 수학 용어 최소화 + 짧은 질문 중심
+                    full3 = ""
+                    if _is_incomplete_utterance(full2):
+                        print(f"       · [ai_stream {aid}] 1차도 미완결 — 2차 재시도(용어 최소화)")
+                        retry_note_2 = (
+                            "\n\n---\n[2차 재생성]: 앞 시도 모두 중단됐다.\n"
+                            "- 수학 용어 사용 최소화. 대신 학생 친구 말투로만.\n"
+                            "- 2문장 이내 짧게. 친구한테 되묻는 질문 하나로 끝내기.\n"
+                            "- 예: '음, 헷갈리는구나. 같이 천천히 볼까?' / '아 그렇게 생각했구나, 왜 그런 것 같아?'\n"
+                        )
+                        try:
+                            raw3 = self.api.call(prompt + retry_note_2, max_tokens=300, temperature=1.2)
+                            full3 = sanitize_ai_output(raw3)
+                        except Exception as e:
+                            print(f"       · [ai_stream {aid}] 2차 재시도 실패: {e}")
+
+                    # 최선 선택: 완결인 것 중 가장 최근 것 우선
                     best = None
-                    if full2 and not _is_incomplete_utterance(full2):
-                        best = full2
-                    elif full and not _is_incomplete_utterance(full):
-                        best = full
-                    else:
-                        # 둘 다 불완결 — 원본/재시도 중 더 긴 쪽 + 강제 종결 어미 부착
-                        candidate = full2 if len(full2) > len(full) else full
-                        if candidate:
-                            # 문장 중간일 가능성 → 마지막 음절 뒤 "... (생성 중 끊김)" 추가
-                            best = candidate.rstrip() + "... _(생성 중 끊김)_"
+                    for candidate in (full3, full2, full):
+                        if candidate and not _is_incomplete_utterance(candidate):
+                            best = candidate
+                            break
+
+                    if best is None:
+                        # 모두 불완결 — partial에 자연스러운 말줄임표로 종결 (UX 마커 제거)
+                        partial = full3 or full2 or full or ""
+                        if partial:
+                            # 마지막이 이미 문장부호면 그대로, 아니면 "..." 추가
+                            if partial.rstrip()[-1:] in ".!?…":
+                                best = partial.rstrip()
+                            else:
+                                best = partial.rstrip() + "..."
                         else:
-                            best = "(발화를 생성하지 못했어요)"
+                            # 아예 빈 응답 — 페르소나별 generic 질문 fallback
+                            generic_by_aid = {
+                                "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
+                                "ai_2": "잠깐, 지금까지 얘기한 거 정리해보면 어떻게 될까?",
+                                "ai_3": "어… 나는 잘 모르겠는데, 같이 다시 볼래?",
+                            }
+                            best = generic_by_aid.get(aid, "잠깐, 다시 볼까?")
                     full = best
 
                 if not started:

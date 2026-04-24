@@ -37,6 +37,14 @@ DEFAULT_GEMINI_FLASH = "gemini-2.5-flash"
 DEFAULT_GEMINI_FLASH_LITE = "gemini-2.5-flash-lite"
 DEFAULT_GEMINI_25 = "gemini-2.5-flash"
 
+# ---- OpenAI 모델 상수 ----
+# RECITATION 필터가 없어 교과 표준 문구 안정. 비용은 Gemini 보다 높지만 품질·안정성 우수.
+# gpt-4o-mini     : 저렴·빠름, 발화 품질 충분. 기본 선택.
+# gpt-4o          : 플래그십. 섬세한 상호작용 필요 시.
+# gpt-4.1-mini    : 최신, 4o-mini 후속
+DEFAULT_OPENAI_MINI = "gpt-4o-mini"
+DEFAULT_OPENAI_FULL = "gpt-4o"
+
 
 class ClaudeAPI:
     """anthropic 클라이언트를 래핑하는 얇은 API 헬퍼.
@@ -170,6 +178,75 @@ class GeminiAPI:
             t = getattr(chunk, "text", None)
             if t:
                 yield t
+
+
+class OpenAIAPI:
+    """OpenAI `openai` SDK(v1.x+)를 래핑한 얇은 API 헬퍼.
+
+    RECITATION 필터가 없어 교과 표준 문구가 안정적. Gemini 대비 비용은 높지만
+    발화 품질과 응답 완결성이 더 우수.
+
+    인터페이스는 ClaudeAPI/GeminiAPI와 동일:
+        call(prompt, max_tokens=..., temperature=..., model=None,
+             stream=False, json_mode=False) -> str
+        call(..., stream=True) -> Iterator[str]
+
+    설치: `pip install openai>=1.0`
+    """
+
+    provider = "openai"
+
+    def __init__(self, model=DEFAULT_OPENAI_MINI, api_key=None):
+        try:
+            from openai import OpenAI as _OpenAI
+        except ImportError as e:
+            raise ImportError(
+                "openai 패키지가 필요합니다. Colab에서 "
+                "`!pip install -U openai` 를 먼저 실행하세요. "
+                f"(원본: {e})"
+            )
+        self._OpenAI = _OpenAI
+        self.model = model
+        # api_key=None이면 SDK가 OPENAI_API_KEY 환경변수에서 자동 로드
+        self._client = _OpenAI(api_key=api_key) if api_key else _OpenAI()
+
+    def _build_kwargs(self, prompt, max_tokens, temperature, model, json_mode):
+        kwargs = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if json_mode:
+            # OpenAI JSON 모드 — 프롬프트에 'json' 단어가 포함되어야 함
+            kwargs["response_format"] = {"type": "json_object"}
+        return kwargs
+
+    def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False,
+             json_mode=False):
+        use_model = model or self.model
+        kwargs = self._build_kwargs(prompt, max_tokens, temperature, use_model, json_mode)
+        if stream:
+            return self._call_stream(kwargs)
+        kwargs["stream"] = False
+        resp = self._client.chat.completions.create(**kwargs)
+        try:
+            msg = resp.choices[0].message.content
+            return msg or ""
+        except Exception:
+            return ""
+
+    def _call_stream(self, kwargs):
+        kwargs["stream"] = True
+        stream = self._client.chat.completions.create(**kwargs)
+        for chunk in stream:
+            try:
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None)
+                if content:
+                    yield content
+            except (AttributeError, IndexError):
+                continue
 
 
 def extract_json(text):

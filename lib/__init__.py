@@ -27,15 +27,16 @@
 # 버전 — 매 커밋마다 +0.01 수동 증가 (단일 source of truth)
 # 이 값이 Gradio UI 상단에 자동 표시된다.
 # ============================================================
-__version__ = "v1.03"
+__version__ = "v1.05"
 
 from .config_loader import load_config, load_json, load_md
 from .learner_model import create_learner_model_instance, init_learners
 from .llm_api import (
-    ClaudeAPI, GeminiAPI,
+    ClaudeAPI, GeminiAPI, OpenAIAPI,
     extract_json, render_prompt,
     DEFAULT_HAIKU, DEFAULT_SONNET,
     DEFAULT_GEMINI_FLASH, DEFAULT_GEMINI_FLASH_LITE, DEFAULT_GEMINI_25,
+    DEFAULT_OPENAI_MINI, DEFAULT_OPENAI_FULL,
 )
 from .session import CollaborativeSession
 from .visualize import (
@@ -57,10 +58,11 @@ __all__ = [
     # learner model
     "create_learner_model_instance", "init_learners",
     # llm
-    "ClaudeAPI", "GeminiAPI",
+    "ClaudeAPI", "GeminiAPI", "OpenAIAPI",
     "extract_json", "render_prompt",
     "DEFAULT_HAIKU", "DEFAULT_SONNET",
     "DEFAULT_GEMINI_FLASH", "DEFAULT_GEMINI_FLASH_LITE", "DEFAULT_GEMINI_25",
+    "DEFAULT_OPENAI_MINI", "DEFAULT_OPENAI_FULL",
     # session
     "CollaborativeSession",
     # visualize
@@ -72,7 +74,7 @@ __all__ = [
 ]
 
 
-def bootstrap(base_path, api_key, model=None, provider="gemini",
+def bootstrap(base_path, api_key, model=None, provider="openai",
               setup_fonts=False):
     """한 번의 호출로 config/prompts/학습자모델/API 객체를 모두 생성.
 
@@ -80,9 +82,10 @@ def bootstrap(base_path, api_key, model=None, provider="gemini",
         base_path:  리포지토리 루트 경로 (config/, prompts/ 하위 포함)
         api_key:    LLM 공급자 API 키 (provider에 맞게)
         model:      모델 식별자. None이면 provider에 맞는 기본값 사용
-                      gemini 기본:   DEFAULT_GEMINI_FLASH ("gemini-2.0-flash")
-                      anthropic 기본: DEFAULT_HAIKU
-        provider:   "gemini" (기본, 무료/저렴) 또는 "anthropic"
+                      openai 기본:    DEFAULT_OPENAI_MINI ("gpt-4o-mini")
+                      gemini 기본:    DEFAULT_GEMINI_FLASH ("gemini-2.5-flash")
+                      anthropic 기본: DEFAULT_HAIKU ("claude-haiku-4-5-...")
+        provider:   "openai"(기본, RECITATION 없음) / "gemini" / "anthropic"
         setup_fonts: True면 NanumGothic 폰트 등록까지 실행
 
     Returns:
@@ -92,17 +95,20 @@ def bootstrap(base_path, api_key, model=None, provider="gemini",
     config, prompts = load_config(base_path)
     learner_models = init_learners(config)
 
-    provider = (provider or "gemini").lower()
-    if provider == "gemini":
+    provider = (provider or "openai").lower()
+    if provider == "openai":
+        api = OpenAIAPI(model=model or DEFAULT_OPENAI_MINI, api_key=api_key)
+    elif provider == "gemini":
         # 신규 SDK `google-genai` 사용. Client 생성자에 직접 api_key를 주입.
-        # Colab의 구 `google.generativeai` import hook 이슈(localhost Read timeout)를 우회.
         api = GeminiAPI(model=model or DEFAULT_GEMINI_FLASH, api_key=api_key)
     elif provider in ("anthropic", "claude"):
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         api = ClaudeAPI(client, model=model or DEFAULT_HAIKU)
     else:
-        raise ValueError(f"Unknown provider: {provider!r} (gemini | anthropic)")
+        raise ValueError(
+            f"Unknown provider: {provider!r} (openai | gemini | anthropic)"
+        )
 
     if setup_fonts:
         import os as _os
