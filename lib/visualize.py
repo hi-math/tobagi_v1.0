@@ -17,7 +17,7 @@ import matplotlib.patches as mpatches
 def setup_korean_font(font_path="/usr/share/fonts/truetype/nanum/NanumGothic.ttf"):
     """Matplotlib 한글 폰트(NanumGothic) 등록.
 
-    Colab 에서는 먼저 `\!apt-get -qq install fonts-nanum` 을 실행해야 파일이 존재한다.
+    Colab 에서는 먼저 `!apt-get -qq install fonts-nanum` 을 실행해야 파일이 존재한다.
     실패하면 경고만 출력하고 조용히 넘어간다.
     """
     try:
@@ -424,17 +424,37 @@ def user_model_markdown(config, learner_models):
                 else:
                     lines.append(f"- 📋 자기효능감 평균 — _(아직 응답 없음)_")
 
-    # === 체크포인트 진행도 섹션 ===
-    lines.append("\n#### 🎯 체크포인트 진행도")
-    lines.append("_Stage별 학습자 발화에서 포착되어야 할 지식 단위. 사용자와 AI 학생 각각의 이해 상태를 기록한다._\n")
+    lines.append(
+        f"\n> _1~5 점수는 루브릭 해석 수준을 의미합니다. "
+        f"A~E 등급은 A=5 … E=1 로 환산. CPS는 누적 카운트 기반 파생 레벨._"
+    )
+    return "\n".join(lines)
 
+
+# --------------------------------------------------------------------
+# 체크포인트 진행도 (별도 탭용 Markdown)
+# --------------------------------------------------------------------
+
+def checkpoint_markdown(config, learner_models):
+    """Stage별 체크포인트 진행도를 테이블로 출력. user + 3 AI 나란히.
+
+    사용자 발화에서 각 체크포인트가 포착되는지, AI 학생에게 전파되는지를
+    한눈에 볼 수 있게 표시. 학습자 모델 패널과 분리된 별도 탭으로 제공.
+    """
     tasks = config.get("tasks") or {}
     stages = tasks.get("stages") or {}
 
     PRIORITY_EMOJI = {"필수": "🔴", "권장": "🟡", "보너스": "🟢"}
     SOURCE_EMOJI = {"user": "✅", "prior": "📚", "observed": "👁", "learned": "💡"}
 
-    # 사용자 + 3 AI의 체크포인트 진행도를 나란히 표시
+    lines = [
+        "### 🎯 지식 체크포인트 진행도",
+        "",
+        "_Stage별 학습자 발화에서 포착돼야 할 지식 단위. "
+        "사용자와 AI 학생 각각의 이해 상태를 나란히 비교해서 보여줍니다._",
+    ]
+
+    # 사용자 + 3 AI 순서
     learner_order = [
         ("user", learner_models.get("user", {}).get("student_name", "사용자")),
     ]
@@ -443,14 +463,38 @@ def user_model_markdown(config, learner_models):
             name = learner_models[aid].get("student_name", aid)
             learner_order.append((aid, name))
 
+    # Stage별 집계 요약 (상단 스냅샷)
+    lines.append("\n#### 📊 Stage별 사용자 진척 요약")
+    summary_rows = []
     for s_key in sorted(stages.keys(), key=lambda x: int(x) if str(x).isdigit() else 99):
         stage = stages[s_key]
         cps = stage.get("checkpoints") or []
         if not cps:
             continue
-        lines.append(f"\n**Stage {s_key} — {stage.get('title', '')}**")
+        user_prog = (learner_models.get("user", {}).get("checkpoint_progress") or {}).get(s_key) or {}
+        total = len(cps)
+        필수 = sum(1 for cp in cps if cp.get("priority") == "필수")
+        hit_총 = sum(1 for cp in cps if user_prog.get(cp.get("id"), {}).get("hit"))
+        hit_필수 = sum(1 for cp in cps
+                    if cp.get("priority") == "필수"
+                    and user_prog.get(cp.get("id"), {}).get("hit"))
+        bar_total = "█" * hit_총 + "░" * (total - hit_총)
+        bar_req = "█" * hit_필수 + "░" * (필수 - hit_필수) if 필수 else "—"
+        summary_rows.append(
+            f"- **Stage {s_key}** · {stage.get('title', '')[:30]}"
+            f"\n    - 필수: `[{bar_req}]` {hit_필수}/{필수}"
+            f"\n    - 전체: `[{bar_total}]` {hit_총}/{total}"
+        )
+    lines.extend(summary_rows)
 
-        # 헤더 행: | 체크포인트 | 사용자 | 민준 | 서연 | 연우 |
+    # 각 Stage별 상세 테이블
+    for s_key in sorted(stages.keys(), key=lambda x: int(x) if str(x).isdigit() else 99):
+        stage = stages[s_key]
+        cps = stage.get("checkpoints") or []
+        if not cps:
+            continue
+        lines.append(f"\n#### Stage {s_key} — {stage.get('title', '')}")
+
         header = "| 체크포인트 | " + " | ".join(n for _, n in learner_order) + " |"
         sep = "|" + "---|" * (len(learner_order) + 1)
         lines.append(header)
@@ -474,13 +518,9 @@ def user_model_markdown(config, learner_models):
             lines.append("| " + " | ".join(row) + " |")
 
     lines.append(
-        "\n> 범례: 🔴필수 · 🟡권장 · 🟢보너스 | "
-        "✅사용자 발화로 포착 · 📚사전지식 · 👁관찰 학습(즉시) · 💡반복 관찰로 학습 · ⬜미포착"
-    )
-
-    lines.append(
-        f"\n> _1~5 점수는 루브릭 해석 수준을 의미합니다. "
-        f"A~E 등급은 A=5 … E=1 로 환산. CPS는 누적 카운트 기반 파생 레벨._"
+        "\n> **범례** — 우선순위: 🔴필수 · 🟡권장 · 🟢보너스 | "
+        "상태: ✅사용자 발화로 포착 · 📚사전지식 · 👁관찰 학습(즉시) · "
+        "💡반복 관찰로 학습 · ⬜미포착"
     )
     return "\n".join(lines)
 

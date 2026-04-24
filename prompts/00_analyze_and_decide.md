@@ -30,6 +30,15 @@
 **Stage 루브릭:** {{stage_rubric}}
 **Stage 체크리스트:** {{stage_checklist}}
 
+**이 Stage의 체크포인트 (checkpoint_hits 선택용 id 목록):**
+{{stage_checkpoints}}
+
+⚠️ **힌트 상한 규칙 (directive 작성 시 준수)**:
+- 사용자가 아직 달성하지 못한 체크포인트 중 **가장 우선순위 높은 "다음 하나"까지만** AI가 힌트·설명할 수 있도록 directive의 `speech_goal`과 `must_include`를 작성한다.
+- 여러 체크포인트를 한 턴에 한꺼번에 풀어주는 directive 금지 (사용자의 사고 단계 생략).
+- `must_avoid`에 "이후 체크포인트 미리 제시 금지" 항목을 기본으로 넣는다.
+- 예: 사용자가 s3-1(12 최소 합성수)을 아직 도출 못 했다면 → directive는 s3-1까지만 유도. s3-2(13)·s3-3(25)은 absolutely 언급 금지.
+
 **수업 목표:** {{learning_objectives}}
 
 **사용자 침묵 시간(초):** {{user_silence_seconds}}

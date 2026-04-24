@@ -107,6 +107,32 @@ def detect_user_mode(user_utterance: str) -> str:
     return "collaborator"
 
 
+def _detect_user_addressed_ai(user_utterance: str):
+    """사용자 발화에서 특정 AI 한 명을 명시적으로 지목했는지 감지.
+
+    반환값:
+      - "ai_1" (민준) / "ai_2" (서연) / "ai_3" (연우): 정확히 한 명만 지목
+      - None: 아무도 지목 안 했거나, 둘 이상 언급 (모호 → 오버라이드 안 함)
+
+    예시:
+      "민준아 너는 어떻게 생각해?"      → ai_1
+      "서연이한테 물어볼래"              → ai_2
+      "연우야 이거 맞아?"                → ai_3
+      "민준이나 서연이"                   → None (2명 언급 → 일반 로직)
+      "약수가 뭐야?"                     → None
+    """
+    if not user_utterance:
+        return None
+    name_map = {"ai_1": "민준", "ai_2": "서연", "ai_3": "연우"}
+    mentioned = set()
+    for aid, name in name_map.items():
+        if name in user_utterance:
+            mentioned.add(aid)
+    if len(mentioned) == 1:
+        return mentioned.pop()
+    return None
+
+
 def _detect_stage_advance_consent(user_utterance: str) -> str:
     """사용자 발화에서 '다음 단계로 넘어가도 되는지'에 대한 승인/거부 신호 감지.
 
@@ -533,6 +559,44 @@ class CollaborativeSession:
             print(f"       · [stage-guard] 완료 기준 충족 감지 → stage_complete=true "
                   f"(reason: {hit_reason})")
 
+    def _apply_user_addressed_override(self, decision, user_utterance):
+        """사용자가 특정 AI를 명시적으로 지목했다면 그 AI 단독 발화로 강제.
+
+        rotation/cap/stage_gate 이후 최종 단계에 실행되어, 사용자 의도가 모든
+        자동 규칙을 이기도록 한다. 지목된 AI에 directive가 없으면 기본 "직접
+        응답" directive를 생성. 다른 AI의 directive는 None으로 초기화.
+        """
+        addressed = _detect_user_addressed_ai(user_utterance)
+        if not addressed:
+            return
+        name_map = {"ai_1": "민준", "ai_2": "서연", "ai_3": "연우"}
+        addressed_name = name_map.get(addressed, addressed)
+
+        current = decision.get("speaking_agents") or []
+        if current == [addressed]:
+            # 이미 해당 AI만 선정됨 — 별도 작업 없음
+            return
+
+        print(f"       · [user-addressed] 사용자가 {addressed_name}({addressed}) 지목 → 단독 발화 강제 (기존: {current})")
+
+        # 지목된 AI의 directive가 없으면 기본 응답 directive 생성
+        if not decision.get(f"{addressed}_directive"):
+            decision[f"{addressed}_directive"] = {
+                "role": f"{addressed_name} — 사용자 직접 응답자",
+                "speech_goal": (
+                    f"사용자가 나({addressed_name})를 직접 지목해 말 걸었다. "
+                    f"내 페르소나 말투로 사용자의 질문·요청에 직접 응답한다."
+                ),
+                "must_include": "사용자가 요청한 내용에 대한 내 대답 또는 반응",
+                "must_avoid": "다른 AI에게 넘기기, 대답 회피, 주제 돌리기",
+            }
+
+        # 다른 AI directive는 모두 비우고 speaking_agents 단일화
+        for other in self.AI_KEYS:
+            if other != addressed:
+                decision[f"{other}_directive"] = None
+        decision["speaking_agents"] = [addressed]
+
     def _apply_stage_gate(self, decision, user_utterance):
         """Stage 완료 2단계 게이트: 조건 충족 → 서연 확인 질문 → 사용자 승인.
 
@@ -583,6 +647,25 @@ class CollaborativeSession:
 
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
+
+    def _format_stage_checkpoints(self, stage):
+        """analyze_and_decide 프롬프트에 주입할 체크포인트 목록 문자열 생성.
+
+        LLM이 checkpoint_hits 필드에 어떤 id를 넣어야 하는지 알려주기 위해
+        id/priority/knowledge/detection_hints를 한 줄씩 열거.
+        """
+        cps = stage.get("checkpoints") or []
+        if not cps:
+            return "(이 Stage에 등록된 체크포인트 없음)"
+        lines = []
+        for cp in cps:
+            cid = cp.get("id", "?")
+            prio = cp.get("priority", "")
+            know = cp.get("knowledge", "")
+            hints = cp.get("detection_hints") or []
+            hints_str = (" | 단서: " + ", ".join(f'"{h}"' for h in hints)) if hints else ""
+            lines.append(f"  - {cid} [{prio}] {know}{hints_str}")
+        return "\n".join(lines)
 
     def _domain_text(self, max_chars=DOMAIN_TRUNCATE_CHARS):
         dk = self.config.get("domain_knowledge") or {}
@@ -852,6 +935,37 @@ class CollaborativeSession:
         just_learned_block = ("\n".join(just_learned_cp_lines)
                               if just_learned_cp_lines else "(없음)")
 
+        # 사용자가 아직 달성 못한 다음 체크포인트 (힌트 상한선)
+        # 필수(0) → 권장(1) → 보너스(2) 순, 동일 순위 내에서는 id 오름차순.
+        # AI가 이 지점 이상으로 먼저 뛰어넘어 답을 흘리지 않도록 프롬프트에 명시.
+        next_cp_block = "(다음 체크포인트 정보 없음)"
+        try:
+            user_prog = (
+                (self.learner_models.get("user", {}).get("checkpoint_progress") or {})
+                .get(str(self.current_stage)) or {}
+            )
+            prio_rank = {"필수": 0, "권장": 1, "보너스": 2}
+            sorted_cps = sorted(
+                stage.get("checkpoints") or [],
+                key=lambda cp: (prio_rank.get(cp.get("priority"), 99), cp.get("id", "")),
+            )
+            next_cp = None
+            for cp in sorted_cps:
+                if not user_prog.get(cp.get("id"), {}).get("hit"):
+                    next_cp = cp
+                    break
+            if next_cp:
+                next_cp_block = (
+                    f"  - id: {next_cp.get('id')}\n"
+                    f"  - priority: {next_cp.get('priority')}\n"
+                    f"  - knowledge: {next_cp.get('knowledge')}\n"
+                    f"  - (이 체크포인트까지만 힌트 허용. 이후 체크포인트로 건너뛰지 말 것)"
+                )
+            else:
+                next_cp_block = "(이 Stage의 모든 체크포인트 사용자 달성 — Stage 종료 준비)"
+        except Exception:
+            pass
+
         # 이 Stage에서 허용된 비계(사용자 요청 시 제공 가능) 목록
         scaffold_lines = []
         for sc in stage.get("allowed_scaffolds") or []:
@@ -870,6 +984,7 @@ class CollaborativeSession:
             "my_learner_state": "(간략화: 페르소나 참조)",
             "my_known_checkpoints": known_cp_block,
             "my_just_learned_checkpoints": just_learned_block,
+            "user_next_uncovered_checkpoint": next_cp_block,
             "allowed_scaffolds": allowed_scaffolds_block,
             "stage_title": stage["title"],
             "stage_prompt": stage["prompt"],
@@ -966,6 +1081,7 @@ class CollaborativeSession:
             "ai_3_learner_model": "(생략)",
             "stage_rubric": stage.get("assessment_rubric", "(해당 Stage 루브릭 없음)"),
             "stage_checklist": stage.get("ai_checklist", "(해당 Stage 체크리스트 없음)"),
+            "stage_checkpoints": self._format_stage_checkpoints(stage),
             "learning_objectives": self.task["learning_objectives"],
             "user_silence_seconds": "0",
             "last_silence_trigger_agent": self.last_silence_agent or "(없음)",
@@ -1034,6 +1150,8 @@ class CollaborativeSession:
             self._stage_complete_safety_net(decision, user_utterance)
             # fallback 경로에서도 2단계 게이트 적용 (조건 충족 시 바로 advance 방지)
             self._apply_stage_gate(decision, user_utterance)
+            # 사용자가 특정 AI를 지목했다면 모든 자동 규칙보다 우선 적용
+            self._apply_user_addressed_override(decision, user_utterance)
             self.last_tutor_decision = decision
             return {"analysis": analysis, "decision": decision}
 
@@ -1088,6 +1206,11 @@ class CollaborativeSession:
 
         # --- Stage 완료 2단계 게이트 (승인 확인) ---
         self._apply_stage_gate(decision, user_utterance)
+
+        # --- 사용자 지목 오버라이드 (최종) ---
+        # "민준아", "서연이한테" 등 명시적 지목 시 해당 AI 단독 발화로 강제.
+        # rotation/cap/stage_gate 이후 마지막에 실행되어 사용자 의도가 이김.
+        self._apply_user_addressed_override(decision, user_utterance)
 
         # --- CPS 태그 반영 (analyze_and_decide가 piggyback으로 태깅) ---
         cps_tags_raw = analysis.get("cps_tags") or []
@@ -1442,8 +1565,6 @@ class CollaborativeSession:
         persona = self.config["personas"]["ai_students"][opener_key]
         stage = self.current_stage_info()
 
-        # 교사 주도 intro_message는 gradio_app이 별도 system 버블로 렌더링한다
-        # (session.conversation에는 append하지 않음 — UI 전용 메시지).
         prompt = render_prompt(self.prompts["stage_intro"], {
             "opener_name": persona["name"],
             "stage_title": stage["title"],
@@ -1495,16 +1616,7 @@ class CollaborativeSession:
             "content": text,
             "stage": self.current_stage,
         })
-        # **AI opener만 반환**한다. intro_message는 별도 system 버블로 이미
-        # self.conversation에 append되어 있고, gradio_app이 별도 렌더링한다.
         return text
-
-    def pop_pending_intro_message(self):
-        """gradio_app에서 stage_intro_utterance 호출 직후 이 메서드로 system 버블을
-        꺼내 별도 UI 버블로 렌더링한다. 반환: intro_message 문자열 또는 None.
-        """
-        stage = self.current_stage_info()
-        return stage.get("intro_message")
 
 
 # ============================================================
