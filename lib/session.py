@@ -106,6 +106,67 @@ def detect_user_mode(user_utterance: str) -> str:
     return "collaborator"
 
 
+def _detect_stage_advance_consent(user_utterance: str) -> str:
+    """사용자 발화에서 '다음 단계로 넘어가도 되는지'에 대한 승인/거부 신호 감지.
+
+    반환값: "consent" | "reject" | "unclear"
+    - consent : "응/네/좋아/맞아/그래/넘어가자/가자/오케이" 등
+    - reject  : "아직/잠깐/좀 더/기다려/근데/아니" 등
+    - unclear : 사용자가 다른 내용 계속 설명 중 (명시적 응답 없음)
+    """
+    if not user_utterance:
+        return "unclear"
+    u = user_utterance.strip().lower()
+
+    consent_tokens = (
+        "응", "네", "좋아", "좋다", "맞아", "맞지", "그래", "ㅇㅇ",
+        "넘어가자", "넘어가도", "넘어가도 돼", "넘어가도 될", "다음",
+        "가자", "고고", "오케이", "ok", "okay", "ㅇㅋ", "yes",
+        "알겠어", "이해했어", "확실해", "문제 없어", "됐어",
+    )
+    reject_tokens = (
+        "아직", "잠깐", "기다려", "멈춰", "좀 더", "더 얘기",
+        "아니", "안 돼", "안돼", "모르겠어", "헷갈려",
+        "근데", "그런데", "no", "not yet",
+    )
+
+    # reject를 먼저 체크 (consent 키워드와 겹칠 수 있음: "아직 잘 모르겠어")
+    for tok in reject_tokens:
+        if tok in u:
+            return "reject"
+    for tok in consent_tokens:
+        if tok in u:
+            return "consent"
+    return "unclear"
+
+
+def _is_incomplete_utterance(s: str) -> bool:
+    """AI 발화가 중간에 잘렸는지 휴리스틱 판정.
+
+    규칙:
+      - 빈 문자열 또는 strip 후 20자 미만 → incomplete
+      - 한글 종결 어미·문장부호로 끝나지 않으면 incomplete ("둘이" "수가" 등 조사·체언 종결 감지)
+
+    Gemini의 RECITATION 조기 종료로 인한 잘림 케이스 대응.
+    """
+    if not s:
+        return True
+    stripped = s.strip().rstrip('"\'」』')
+    if len(stripped) < 20:
+        return True
+    terminators = (
+        ".", "!", "?", "…",
+        # 한글 문장 종결 어미 (평서/의문/청유/감탄)
+        "야", "어", "지", "까", "래", "네", "해", "자",
+        "다", "니", "아", "요", "나",
+        # 축약 동사 종결형 (예: 헷갈려, 봐줘, 잘 돼, 보면 돼)
+        "려", "줘", "봐", "돼", "와", "게",
+        # 결합형
+        "볼까", "할래", "어때", "있지", "맞아", "같아", "헷갈려", "모르겠어",
+    )
+    return not any(stripped.endswith(t) for t in terminators)
+
+
 class CollaborativeSession:
     """사용자 1명 + AI 학생 3명의 협력학습 세션."""
 
@@ -127,6 +188,11 @@ class CollaborativeSession:
         self.last_user_utterance_ts = time.time()
         self.last_silence_agent = None
         self.current_user_mode = "collaborator"
+
+        # Stage 완료 2단계 게이트: 조건 충족 → 서연이 확인 질문 → 사용자 승인 → 실제 advance
+        # "pending" 상태에서는 stage_complete=False로 강제해 자동 advance 방지.
+        self.pending_stage_complete = False
+        self.pending_stage_complete_since_turn = None
 
     def recent_dialogue(self, n=6):
         recent = self.conversation[-n:]
@@ -684,7 +750,22 @@ class CollaborativeSession:
         )
         # max_tokens=480: 한글 2~4문장이 잘리지 않게 여유 있게 설정
         raw = self.api.call(prompt, max_tokens=480, temperature=0.9)
-        return sanitize_ai_output(raw)
+        text = sanitize_ai_output(raw)
+
+        # 미완결이면 1회 재시도 (temperature 변경, Gemini RECITATION 회피)
+        if _is_incomplete_utterance(text):
+            print(f"       · [ai_utterance {student_key}] 미완결({len(text)}자, '{text[-10:] if text else ''}') — 재시도")
+            raw2 = self.api.call(prompt, max_tokens=480, temperature=1.0)
+            text2 = sanitize_ai_output(raw2)
+            if not _is_incomplete_utterance(text2) or len(text2) > len(text):
+                text = text2
+            else:
+                # 둘 다 불완전이면 그나마 긴 쪽 + 종결 어미 추가
+                if text and not _is_incomplete_utterance(text + "..."):
+                    text = text.rstrip() + "..."
+                else:
+                    text = (text or "") + " (발화가 끊겼어요)"
+        return text
 
     def analyze_and_decide(self, user_utterance):
         stage = self.current_stage_info()
@@ -812,6 +893,50 @@ class CollaborativeSession:
         self._enforce_rotation_guard(decision)
         # stage_complete 안전망: LLM이 false여도 명시적 완료 기준을 충족하면 true로 교정
         self._stage_complete_safety_net(decision, user_utterance)
+
+        # --- Stage 완료 2단계 게이트 (승인 확인) ---
+        # 1) 이미 pending 상태라면 사용자 발화에서 승인/거부 판정
+        # 2) pending이 아닌데 이번 턴에 stage_complete=True가 떴다면, 실제 advance는 막고
+        #    서연(ai_2)에게 확인 질문 directive를 주어 사용자에게 물어본다.
+        consent = _detect_stage_advance_consent(user_utterance)
+        if self.pending_stage_complete:
+            if consent == "consent":
+                print(f"       · [stage-gate] 사용자 승인 감지 → stage_complete=True 확정")
+                decision["stage_complete"] = True
+                self.pending_stage_complete = False
+                self.pending_stage_complete_since_turn = None
+            elif consent == "reject":
+                print(f"       · [stage-gate] 사용자 거부 감지 → pending 해제, Stage 유지")
+                decision["stage_complete"] = False
+                self.pending_stage_complete = False
+                self.pending_stage_complete_since_turn = None
+            else:
+                # 사용자가 다른 내용 계속 설명 중 → 2턴 이상 지속되면 pending 해제
+                held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
+                if held_turns >= 2:
+                    print(f"       · [stage-gate] pending 2턴 경과 → 해제, Stage 유지")
+                    self.pending_stage_complete = False
+                    self.pending_stage_complete_since_turn = None
+                decision["stage_complete"] = False  # pending 중엔 advance 막음
+        elif decision.get("stage_complete"):
+            # 최초로 완료 조건 충족 감지 → 승인 질문 모드로 전환
+            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 — 서연 확인 질문 삽입")
+            self.pending_stage_complete = True
+            self.pending_stage_complete_since_turn = self.turn_count
+            decision["stage_complete"] = False  # 바로 advance 막기
+            # 서연(ai_2) 혼자 발화하도록 강제 + 확인 directive 주입
+            decision["speaking_agents"] = ["ai_2"]
+            decision["ai_1_directive"] = None
+            decision["ai_3_directive"] = None
+            decision["ai_2_directive"] = {
+                "role": "진행자 (Stage 완료 승인 확인)",
+                "speech_goal": (
+                    "지금까지 사용자가 한 설명을 한 줄로 짧게 요약해 재진술한 뒤, "
+                    "'이렇게 이해하고 다음 단계로 넘어가도 될까?' 라고 분명하게 승인을 묻는다."
+                ),
+                "must_include": "사용자가 방금 말한 핵심 표현을 그대로 짧게 인용 + 승인 질문 (예: '~ 이렇게 정리해도 돼? 다음으로 넘어가도 될까?')",
+                "must_avoid": "새로운 개념 도입, 긴 설명, 두 개 이상의 질문",
+            }
 
         # --- CPS 태그 반영 (analyze_and_decide가 piggyback으로 태깅) ---
         cps_tags_raw = analysis.get("cps_tags") or []
@@ -991,6 +1116,20 @@ class CollaborativeSession:
                     buf.append(chunk)
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
+
+                # 스트림이 도중 잘린 경우(RECITATION 등) — 한 번 비스트림 재호출
+                if _is_incomplete_utterance(full):
+                    print(f"       · [ai_stream {aid}] 미완결({len(full)}자, '{full[-10:] if full else ''}') — 비스트림 재시도")
+                    try:
+                        raw2 = self.api.call(prompt, max_tokens=480, temperature=1.0)
+                        full2 = sanitize_ai_output(raw2)
+                        if not _is_incomplete_utterance(full2) or len(full2) > len(full):
+                            # 전체 버블 내용 교체
+                            full = full2
+                            # UI에 이미 보낸 partial을 덮어쓰기 위해 done에서 최종값 전달
+                    except Exception as e:
+                        print(f"       · [ai_stream {aid}] 재시도 실패: {e}")
+
                 if not started:
                     q.put(("start", aid, ""))
                 q.put(("done", aid, full))
@@ -1129,31 +1268,8 @@ class CollaborativeSession:
         print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...")
         text = sanitize_ai_output(raw)
 
-        def _is_incomplete(s: str) -> bool:
-            """응답이 중간에 잘렸는지 휴리스틱 판정.
-
-            규칙:
-              - 20자 미만은 무조건 짧은 것(불완전)
-              - 그 이상이면 **문장 종결부호·종결 어미**로 끝나야 완성
-              - '둘이', '수가' 같은 조사·체언으로 끝나면 잘린 것
-            """
-            if not s:
-                return True
-            stripped = s.strip().rstrip('"\'」』')
-            if len(stripped) < 20:
-                return True
-            # 한글 종결 어미·문장부호로 끝나면 완결
-            terminators = (
-                ".", "!", "?", "…",
-                # 한글 문장 종결 어미 (평서/의문/청유/감탄)
-                "야", "어", "지", "까", "래", "네", "해", "자",
-                "다", "니", "아", "요", "나",
-                # 자주 나오는 결합형
-                "볼까", "할래", "어때", "있지", "맞아", "같아",
-            )
-            return not any(stripped.endswith(t) for t in terminators)
-
-        # 불완전(길이 짧음 or 문장 미종결)이면 재시도
+        # 불완전(길이 짧음 or 문장 미종결)이면 재시도 (모듈 레벨 헬퍼 사용)
+        _is_incomplete = _is_incomplete_utterance
         attempt = 1
         while _is_incomplete(text) and attempt <= 2:
             print(f"       · [stage_intro] 불완전({len(text)}자, '{text[-10:] if text else ''}') — 재시도 #{attempt}")
