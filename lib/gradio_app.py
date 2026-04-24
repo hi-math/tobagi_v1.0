@@ -321,7 +321,21 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
     except Exception:
         _app_version = "v?.??"
 
-    with gr.Blocks(title=f"협력학습 세션 {_app_version}", theme=gr.themes.Soft()) as demo:
+    # Gradio 버전 감지 — 5.x와 6.0+ 사이 API 변경 호환 처리
+    # - 5.x: gr.Blocks(theme=...), gr.Chatbot(type="messages")
+    # - 6.0: theme은 launch()로 이동, Chatbot은 messages가 기본이라 type 인자 불필요
+    _gr_major = 5
+    try:
+        _v = getattr(gr, "__version__", "5.0.0")
+        _gr_major = int(str(_v).split(".")[0])
+    except Exception:
+        pass
+
+    _blocks_kwargs = {"title": f"협력학습 세션 {_app_version}"}
+    if _gr_major < 6:
+        _blocks_kwargs["theme"] = gr.themes.Soft()
+
+    with gr.Blocks(**_blocks_kwargs) as demo:
         gr.Markdown(
             f"# {session.task['task_title']}   "
             f"<span style='font-size:0.55em; color:#888; font-weight:400; "
@@ -331,13 +345,16 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         )
         with gr.Row():
             with gr.Column(scale=3):
-                chatbot = gr.Chatbot(
-                    value=[],
-                    type="messages",
-                    height=560,
-                    label="세션 대화",
-                    show_copy_button=True,
-                )
+                _chatbot_kwargs = {
+                    "value": [],
+                    "height": 560,
+                    "label": "세션 대화",
+                    "show_copy_button": True,
+                }
+                # 5.x만 type="messages" 명시 (6.x는 기본이 messages라 불필요/오류)
+                if _gr_major < 6:
+                    _chatbot_kwargs["type"] = "messages"
+                chatbot = gr.Chatbot(**_chatbot_kwargs)
                 with gr.Row():
                     msg = gr.Textbox(
                         placeholder="질문이나 답변을 입력하고 Enter (Shift+Enter로 줄바꿈)",
@@ -410,5 +427,12 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
         demo.load(_misconception_timeline, outputs=misc_plot)
         demo.load(_cps_heatmap, outputs=cps_plot)
 
-    demo.launch(share=share, debug=False, quiet=True)
+    # Gradio 6.0+에서는 theme가 launch() 인자로 이동
+    _launch_kwargs = {"share": share, "debug": False, "quiet": True}
+    if _gr_major >= 6:
+        try:
+            _launch_kwargs["theme"] = gr.themes.Soft()
+        except Exception:
+            pass
+    demo.launch(**_launch_kwargs)
     return demo
