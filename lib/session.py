@@ -1103,7 +1103,11 @@ class CollaborativeSession:
         # anthropic은 이미 Haiku(기본)라 오버라이드 불필요
 
         def _invoke():
-            return self.api.call(prompt, max_tokens=400, temperature=0.4,
+            # max_tokens=700: JSON에 analysis(updates/misconc/cps_tags/checkpoint_hits/
+            # self_efficacy_delta/stage_level_estimate/observation_summary) + decision 까지
+            # 모두 담아야 하므로 여유 있게. 이전 400은 끝의 checkpoint_hits/se_delta가
+            # 잘릴 가능성.
+            return self.api.call(prompt, max_tokens=700, temperature=0.4,
                                  model=fast_model, json_mode=use_json_mode)
 
         t0 = time.time()
@@ -1113,8 +1117,12 @@ class CollaborativeSession:
                 fut = pool.submit(_invoke)
                 raw = fut.result(timeout=30)
             dt = time.time() - t0
-            print(f"       · analyze_and_decide 응답 {dt:.1f}s (model={fast_model or self.api.model})")
+            print(f"       · analyze_and_decide 응답 {dt:.1f}s (model={fast_model or self.api.model}) len={len(raw)}")
             merged = extract_json(raw)
+            # 진단: LLM이 반환한 키 구조 로그
+            _a = merged.get("analysis") or {}
+            _d = merged.get("decision") or {}
+            print(f"       · [analyze keys] top={sorted(merged.keys())} analysis={sorted(_a.keys())}")
         except Exception as e:
             dt = time.time() - t0
             print(f"  ⚠️ 통합 분석/결정 실패({dt:.1f}s): {e} — 기본 결정으로 대체 (fallback 호출 생략)")
@@ -1213,7 +1221,7 @@ class CollaborativeSession:
         self._apply_user_addressed_override(decision, user_utterance)
 
         # --- CPS 태그 반영 (analyze_and_decide가 piggyback으로 태깅) ---
-        cps_tags_raw = analysis.get("cps_tags") or []
+        cps_tags_raw = analysis.get("cps_tags") or merged.get("cps_tags") or []
         if cps_tags_raw:
             try:
                 from .learner_model import apply_cps_tags
@@ -1229,7 +1237,11 @@ class CollaborativeSession:
                 print(f"       · [cps] 태그 반영 실패: {e}")
 
         # --- self-efficacy 신호 반영 (발화 tone 기반 ±1) ---
-        se_signals = analysis.get("self_efficacy_delta") or []
+        se_signals = (
+            analysis.get("self_efficacy_delta")
+            or merged.get("self_efficacy_delta")
+            or []
+        )
         if se_signals:
             try:
                 from .learner_model import apply_self_efficacy_signal
@@ -1246,7 +1258,18 @@ class CollaborativeSession:
                 print(f"       · [se] 신호 반영 실패: {e}")
 
         # --- 체크포인트 적용 + AI 전파 ---
-        checkpoint_hits = analysis.get("checkpoint_hits") or []
+        # 방어적 파싱: LLM이 analysis 안이 아닌 top-level에 올리는 경우도 있음
+        checkpoint_hits = (
+            analysis.get("checkpoint_hits")
+            or merged.get("checkpoint_hits")
+            or []
+        )
+        # 문자열 단일 반환 대응 (예: "s1-1")
+        if isinstance(checkpoint_hits, str):
+            checkpoint_hits = [checkpoint_hits]
+        # id 정규화 (공백 제거)
+        checkpoint_hits = [str(h).strip() for h in checkpoint_hits if h]
+        print(f"       · [checkpoint raw] {checkpoint_hits}")
         if checkpoint_hits:
             try:
                 from .learner_model import (
