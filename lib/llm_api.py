@@ -137,6 +137,14 @@ class GeminiAPI:
         resp = self._client.models.generate_content(
             model=use_model, contents=prompt, config=config,
         )
+        # finish_reason 진단: MAX_TOKENS(정상 종료) / STOP(정상) / SAFETY / RECITATION / OTHER
+        # RECITATION: 교과서 문장과 유사해 차단 → 조기 종료로 짧은 응답 원인
+        # SAFETY:     안전 필터 차단
+        for c in getattr(resp, "candidates", []) or []:
+            fr = getattr(c, "finish_reason", None)
+            if fr and str(fr).upper() not in ("STOP", "FINISH_REASON_STOP", "1"):
+                print(f"       · [gemini {use_model}] finish_reason={fr}")
+                break
         # 안전 필터 차단 등으로 text 속성이 비어있을 수 있음 → 파트 긁어모으기 폴백
         try:
             text = resp.text

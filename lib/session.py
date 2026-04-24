@@ -1124,9 +1124,33 @@ class CollaborativeSession:
             "my_persona": persona,
             "domain_knowledge": self._domain_text(),
         })
-        # stage_intro는 짧지만 막히지 않을 정도로 여유 (max_tokens=360)
-        raw = self.api.call(prompt, max_tokens=360, temperature=0.8)
+        # stage_intro: max_tokens 넉넉하게 + 진단 로그로 truncation 원인 추적
+        raw = self.api.call(prompt, max_tokens=600, temperature=0.8)
+        print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...")
         text = sanitize_ai_output(raw)
+
+        # 너무 짧으면 (RECITATION 등으로 조기 종료) 한 번 재시도 —
+        # 과제 제목을 제거한 축약 프롬프트로 시도.
+        if len(text) < 25:
+            print(f"       · [stage_intro] 응답 너무 짧음({len(text)}자) — 재시도")
+            retry_prompt = render_prompt(self.prompts["stage_intro"], {
+                "opener_name": persona["name"],
+                "stage_title": "새로운 단계",  # 제목 제거
+                "stage_prompt": stage["prompt"],
+                "core_question": stage["core_question"],
+                "my_persona": persona,
+                "domain_knowledge": "",  # 도메인 자료도 제외
+            })
+            raw = self.api.call(retry_prompt, max_tokens=600, temperature=0.95)
+            print(f"       · [stage_intro retry len={len(raw)}] {raw[:120]!r}...")
+            text = sanitize_ai_output(raw)
+
+        # 그래도 짧으면 하드코딩 fallback
+        if len(text) < 15:
+            text = f"자, 이번에는 새로운 걸 같이 얘기해볼까? 다들 어떻게 생각해?"
+            print(f"       · [stage_intro] 하드코딩 fallback 적용")
+
+        print(f"       · [stage_intro final len={len(text)}] {text[:120]!r}...")
         self.conversation.append({
             "speaker": persona["name"],
             "content": text,
