@@ -719,6 +719,17 @@ class CollaborativeSession:
         just_learned_block = ("\n".join(just_learned_cp_lines)
                               if just_learned_cp_lines else "(없음)")
 
+        # 이 Stage에서 허용된 비계(사용자 요청 시 제공 가능) 목록
+        scaffold_lines = []
+        for sc in stage.get("allowed_scaffolds") or []:
+            triggers = " / ".join(f'"{t}"' for t in (sc.get("when_user_asks") or []))
+            scaffold_lines.append(
+                f"  - [{sc.get('id')}] 사용자가 {triggers} 류의 요청 → "
+                f"{sc.get('provide')} (유지: {sc.get('must_still')})"
+            )
+        allowed_scaffolds_block = ("\n".join(scaffold_lines)
+                                    if scaffold_lines else "  (이 Stage에 등록된 비계 없음)")
+
         return render_prompt(self.prompts["ai_student"], {
             "student_name": persona["name"],
             "my_persona": persona_slim,
@@ -726,6 +737,7 @@ class CollaborativeSession:
             "my_learner_state": "(간략화: 페르소나 참조)",
             "my_known_checkpoints": known_cp_block,
             "my_just_learned_checkpoints": just_learned_block,
+            "allowed_scaffolds": allowed_scaffolds_block,
             "stage_title": stage["title"],
             "stage_prompt": stage["prompt"],
             "role": directive.get("role", ""),
@@ -752,10 +764,16 @@ class CollaborativeSession:
         raw = self.api.call(prompt, max_tokens=480, temperature=0.9)
         text = sanitize_ai_output(raw)
 
-        # 미완결이면 1회 재시도 (temperature 변경, Gemini RECITATION 회피)
+        # 미완결이면 1회 재시도 (temperature 변경 + RECITATION 회피 지시 추가)
         if _is_incomplete_utterance(text):
             print(f"       · [ai_utterance {student_key}] 미완결({len(text)}자, '{text[-10:] if text else ''}') — 재시도")
-            raw2 = self.api.call(prompt, max_tokens=480, temperature=1.0)
+            retry_note = (
+                "\n\n---\n[중요·재생성]: 직전 시도에서 응답이 중단됐다. 다음을 엄수:\n"
+                "- '단일 따옴표'나 \"이중 따옴표\"로 수학 용어(소수·합성수·약수 등)를 감싸지 말 것.\n"
+                "- 교과서 정의를 그대로 인용하지 말고 학생 말투로 풀어 쓸 것.\n"
+                "- 반드시 문장 종결 어미(~야/어/지/까/래/해 등)로 끝맺을 것.\n"
+            )
+            raw2 = self.api.call(prompt + retry_note, max_tokens=480, temperature=1.0)
             text2 = sanitize_ai_output(raw2)
             if not _is_incomplete_utterance(text2) or len(text2) > len(text):
                 text = text2
@@ -1117,11 +1135,18 @@ class CollaborativeSession:
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
 
-                # 스트림이 도중 잘린 경우(RECITATION 등) — 한 번 비스트림 재호출
+                # 스트림이 도중 잘린 경우(RECITATION 등) — 한 번 비스트림 재호출.
+                # 재시도 프롬프트에 명시적 RECITATION 회피 지시 추가.
                 if _is_incomplete_utterance(full):
                     print(f"       · [ai_stream {aid}] 미완결({len(full)}자, '{full[-10:] if full else ''}') — 비스트림 재시도")
+                    retry_note = (
+                        "\n\n---\n[중요·재생성]: 직전 시도에서 응답이 중단됐다. 다음을 엄수:\n"
+                        "- '단일 따옴표'나 \"이중 따옴표\"로 수학 용어(소수·합성수·약수 등)를 감싸지 말 것.\n"
+                        "- 교과서 정의를 그대로 인용하지 말고 학생 말투로 풀어 쓸 것.\n"
+                        "- 반드시 문장 종결 어미(~야/어/지/까/래/해 등)로 끝맺을 것.\n"
+                    )
                     try:
-                        raw2 = self.api.call(prompt, max_tokens=480, temperature=1.0)
+                        raw2 = self.api.call(prompt + retry_note, max_tokens=480, temperature=1.0)
                         full2 = sanitize_ai_output(raw2)
                         if not _is_incomplete_utterance(full2) or len(full2) > len(full):
                             # 전체 버블 내용 교체
