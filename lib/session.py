@@ -167,26 +167,45 @@ def _detect_stage_advance_consent(user_utterance: str) -> str:
     return "unclear"
 
 
+def _trim_to_last_complete_sentence(text: str) -> str:
+    """잘린 발화를 마지막 완결 문장(. ? ! 종결)까지 트림.
+
+    완결 문장이 하나도 없으면 빈 문자열 반환 → caller가 generic fallback 사용.
+    """
+    if not text:
+        return ""
+    # 끝의 말줄임표·공백 제거
+    s = text.rstrip().rstrip("…").rstrip(".")
+    s = s.rstrip()
+    # 마지막 종결부호 찾기
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] in ".!?":
+            return s[: i + 1]
+    return ""
+
+
 def _is_incomplete_utterance(s: str) -> bool:
     """AI 발화가 중간에 잘렸는지 휴리스틱 판정.
 
     규칙:
       - 빈 문자열 또는 strip 후 20자 미만 → incomplete
-      - 문장 부호(. ! ? …)로 끝나면 완결로 신뢰
-      - 그 외에는 **다중 음절 종결패턴**만 완결로 인정 (단일 한글 음절은 모호해서 제외)
-        · '어'는 '어때/어떨까/어떻게' 시작 / '자'는 '자기/자신' 시작 등, 단일 음절 종결은
-          절단된 다음 음절과 구분 불가능해 false negative 빈발.
-        · 예: "숫자 7은 어" → 완결 아님 (다음에 '어때?'가 올 수도).
+      - **말줄임표(... 또는 …)로 끝나면 incomplete** (truncation 표시)
+      - 단일 문장부호(. ! ?)로 끝나면 완결
+      - 그 외에는 다중 음절 종결패턴만 완결로 인정 (단일 한글 음절은 모호)
 
-    Gemini의 RECITATION 조기 종료로 인한 잘림 케이스 대응.
+    Gemini RECITATION·max_tokens 잘림 시 LLM이 "..." 로 마무리하는 패턴 다수.
+    이걸 종결로 잘못 보면 retry 발동 안 함 → 잘린 채 사용자에게 전달.
     """
     if not s:
         return True
     stripped = s.strip().rstrip('"\'」』')
     if len(stripped) < 20:
         return True
-    # 1) 명시적 문장부호 종결 → 완결
-    if stripped[-1] in ".!?…":
+    # 1) 말줄임표 종결 → **incomplete** (가장 먼저 체크, 단일 . 보다 우선)
+    if stripped.endswith("...") or stripped.endswith("…"):
+        return True
+    # 2) 단일 문장부호 종결 → 완결
+    if stripped[-1] in ".!?":
         return False
 
     # 2) 다중 음절 한국어 종결 패턴만 완결로 인정 (2~4글자 확실한 패턴)
@@ -1042,16 +1061,15 @@ class CollaborativeSession:
                     break
             if best is None:
                 partial = text3 or text2 or text or ""
-                if partial:
-                    if partial.rstrip()[-1:] in ".!?…":
-                        best = partial.rstrip()
-                    else:
-                        best = partial.rstrip() + "..."
+                trimmed = _trim_to_last_complete_sentence(partial) if partial else ""
+                if trimmed and len(trimmed) >= 20:
+                    best = trimmed
                 else:
+                    # 트림 실패 또는 빈 응답 — 페르소나별 generic
                     generic = {
                         "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
                         "ai_2": "잠깐, 지금까지 얘기한 거 정리해볼래?",
-                        "ai_3": "어… 나는 잘 모르겠는데, 같이 볼래?",
+                        "ai_3": "어, 나는 잘 모르겠는데, 같이 볼래?",
                     }
                     best = generic.get(student_key, "잠깐, 다시 볼까?")
             text = best
@@ -1449,20 +1467,18 @@ class CollaborativeSession:
                             break
 
                     if best is None:
-                        # 모두 불완결 — partial에 자연스러운 말줄임표로 종결 (UX 마커 제거)
+                        # 모두 불완결 — partial을 마지막 완결 문장까지 트림.
+                        # "..." 마커는 UX에 혼란이라 절대 부착하지 않음.
                         partial = full3 or full2 or full or ""
-                        if partial:
-                            # 마지막이 이미 문장부호면 그대로, 아니면 "..." 추가
-                            if partial.rstrip()[-1:] in ".!?…":
-                                best = partial.rstrip()
-                            else:
-                                best = partial.rstrip() + "..."
+                        trimmed = _trim_to_last_complete_sentence(partial) if partial else ""
+                        if trimmed and len(trimmed) >= 20:
+                            best = trimmed
                         else:
-                            # 아예 빈 응답 — 페르소나별 generic 질문 fallback
+                            # 트림 결과 너무 짧거나 빈 응답 — 페르소나별 generic 질문
                             generic_by_aid = {
                                 "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
                                 "ai_2": "잠깐, 지금까지 얘기한 거 정리해보면 어떻게 될까?",
-                                "ai_3": "어… 나는 잘 모르겠는데, 같이 다시 볼래?",
+                                "ai_3": "어, 나는 잘 모르겠는데, 같이 다시 볼래?",
                             }
                             best = generic_by_aid.get(aid, "잠깐, 다시 볼까?")
                     full = best
