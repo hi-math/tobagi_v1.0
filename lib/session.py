@@ -664,7 +664,7 @@ class CollaborativeSession:
         """analyze_and_decide 프롬프트에 주입할 체크포인트 목록 문자열 생성.
 
         LLM이 checkpoint_hits 필드에 어떤 id를 넣어야 하는지 알려주기 위해
-        id/priority/knowledge/detection_hints를 한 줄씩 열거.
+        id/priority/knowledge + 구체 hit 조건을 한 줄씩 열거.
         """
         cps = stage.get("checkpoints") or []
         if not cps:
@@ -675,8 +675,14 @@ class CollaborativeSession:
             prio = cp.get("priority", "")
             know = cp.get("knowledge", "")
             hints = cp.get("detection_hints") or []
-            hints_str = (" | 단서: " + ", ".join(f'"{h}"' for h in hints)) if hints else ""
-            lines.append(f"  - {cid} [{prio}] {know}{hints_str}")
+            hint_examples = ", ".join(f'"{h}"' for h in hints[:5])  # 최대 5개만
+            hint_part = f" | hit 단서 예: {hint_examples}" if hint_examples else ""
+            lines.append(f"  - {cid} [{prio}] {know}{hint_part}")
+        lines.append("")
+        lines.append(
+            "  ▶ hit 판정: 위 어휘·표현·숫자 중 하나라도 사용자 발화에 등장하면 그 체크포인트 hit. "
+            "예: 사용자가 '약수' 단어를 쓰면 s1-1 hit. '3의 약수는 1과 3'이라고 말하면 s1-1(어휘) + s1-4(예시) 둘 다 hit."
+        )
         return "\n".join(lines)
 
     def _domain_text(self, max_chars=DOMAIN_TRUNCATE_CHARS):
@@ -1292,6 +1298,16 @@ class CollaborativeSession:
                 )
                 if new_user:
                     print(f"       · [checkpoint] user +{new_user}: {checkpoint_hits}")
+                else:
+                    print(f"       · [checkpoint] user 변동 없음 (hits={checkpoint_hits} 모두 이미 등록)")
+                # 진척도 스냅샷
+                user_prog_snapshot = (
+                    self.learner_models["user"].get("checkpoint_progress", {})
+                    .get(str(self.current_stage), {})
+                )
+                hit_ids_now = sorted(cid for cid, v in user_prog_snapshot.items()
+                                     if isinstance(v, dict) and v.get("hit"))
+                print(f"       · [checkpoint stage{self.current_stage} progress] hit={hit_ids_now}")
 
                 ai_levels = {
                     aid: self.config["personas"]["ai_students"][aid].get("level", "중")
