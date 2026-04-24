@@ -1129,26 +1129,60 @@ class CollaborativeSession:
         print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...")
         text = sanitize_ai_output(raw)
 
-        # 너무 짧으면 (RECITATION 등으로 조기 종료) 한 번 재시도 —
-        # 과제 제목을 제거한 축약 프롬프트로 시도.
-        if len(text) < 25:
-            print(f"       · [stage_intro] 응답 너무 짧음({len(text)}자) — 재시도")
+        def _is_incomplete(s: str) -> bool:
+            """응답이 중간에 잘렸는지 휴리스틱 판정.
+
+            규칙:
+              - 20자 미만은 무조건 짧은 것(불완전)
+              - 그 이상이면 **문장 종결부호·종결 어미**로 끝나야 완성
+              - '둘이', '수가' 같은 조사·체언으로 끝나면 잘린 것
+            """
+            if not s:
+                return True
+            stripped = s.strip().rstrip('"\'」』")
+            if len(stripped) < 20:
+                return True
+            # 한글 종결 어미·문장부호로 끝나면 완결
+            terminators = (
+                ".", "!", "?", "…",
+                # 한글 문장 종결 어미 (평서/의문/청유/감탄)
+                "야", "어", "지", "까", "래", "네", "해", "자",
+                "다", "니", "아", "요", "나",
+                # 자주 나오는 결합형
+                "볼까", "할래", "어때", "있지", "맞아", "같아",
+            )
+            return not any(stripped.endswith(t) for t in terminators)
+
+        # 불완전(길이 짧음 or 문장 미종결)이면 재시도
+        attempt = 1
+        while _is_incomplete(text) and attempt <= 2:
+            print(f"       · [stage_intro] 불완전({len(text)}자, '{text[-10:] if text else ''}') — 재시도 #{attempt}")
             retry_prompt = render_prompt(self.prompts["stage_intro"], {
                 "opener_name": persona["name"],
-                "stage_title": "새로운 단계",  # 제목 제거
+                # 첫 재시도: 제목 교체. 두 번째: 제목 더 일반화
+                "stage_title": ("새로운 단계" if attempt == 1 else "다음 활동"),
                 "stage_prompt": stage["prompt"],
                 "core_question": stage["core_question"],
                 "my_persona": persona,
-                "domain_knowledge": "",  # 도메인 자료도 제외
+                "domain_knowledge": "",
             })
-            raw = self.api.call(retry_prompt, max_tokens=600, temperature=0.95)
-            print(f"       · [stage_intro retry len={len(raw)}] {raw[:120]!r}...")
+            # 재시도마다 temperature 살짝 올려 다른 출력 유도
+            raw = self.api.call(retry_prompt, max_tokens=600, temperature=0.9 + 0.05 * attempt)
+            print(f"       · [stage_intro retry#{attempt} len={len(raw)}] {raw[:120]!r}...")
             text = sanitize_ai_output(raw)
+            attempt += 1
 
-        # 그래도 짧으면 하드코딩 fallback
-        if len(text) < 15:
-            text = f"자, 이번에는 새로운 걸 같이 얘기해볼까? 다들 어떻게 생각해?"
-            print(f"       · [stage_intro] 하드코딩 fallback 적용")
+        # 그래도 불완전하면 하드코딩 fallback
+        if _is_incomplete(text):
+            stage_num = self.current_stage
+            fallback_by_stage = {
+                1: "자, 이번엔 소수랑 합성수가 뭔지 같이 얘기해 보자. 다들 어떻게 생각해?",
+                2: "자, 이번엔 20부터 30까지의 수 중에 소수가 뭐가 있는지 한번 찾아보자. 누가 먼저 해볼래?",
+                3: "자, 이번엔 진짜 문제야. 10보다 큰 최소 합성수랑 15보다 작은 최대 소수의 합을 구해보자. 어디서부터 시작해볼까?",
+            }
+            text = fallback_by_stage.get(stage_num,
+                "자, 이번에는 새로운 걸 같이 얘기해볼까? 다들 어떻게 생각해?")
+            print(f"       · [stage_intro] 하드코딩 fallback 적용 (stage {stage_num})")
 
         print(f"       · [stage_intro final len={len(text)}] {text[:120]!r}...")
         self.conversation.append({
