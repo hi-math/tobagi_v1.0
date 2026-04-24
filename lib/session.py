@@ -375,6 +375,64 @@ class CollaborativeSession:
         if deduped != speakers_in:
             print(f"       · [rotation-guard] 교정: {speakers_in} → {deduped}")
 
+    def _cap_single_speaker(self, decision):
+        """한 턴 기본 1명 발화로 강제. 두 명이 유사한 호응을 반복하는 문제 방지.
+
+        **2명 허용 예외**:
+          - silence_trigger=True (침묵 유도 턴, 이미 단일 AI로 처리됨)
+          - directive role이 **명백히 상호보완적**인 경우:
+              * 한쪽 role에 "질문자·유도·반례·설명" 포함 (main)
+              * 다른쪽 role에 "정리·요약·되짚기·확인" 포함 (complementary)
+              * 그 외 중복 가능 조합은 main 1명으로 축소
+
+        우선순위(중복 시 남길 AI): 사용자 발화에 가장 적합한 역할자.
+        기본: 이미 LLM이 선정한 순서에서 첫 번째.
+        """
+        speakers = list(decision.get("speaking_agents") or [])
+        if len(speakers) <= 1:
+            return
+
+        directives = {a: (decision.get(f"{a}_directive") or {}) for a in speakers}
+        roles = {a: (d.get("role", "") or "") + " " + (d.get("speech_goal", "") or "")
+                 for a, d in directives.items()}
+
+        main_markers = ("질문자", "유도", "반례", "설명", "답 힌트", "근거", "판정")
+        comp_markers = ("정리", "요약", "되짚기", "확인", "재진술", "진행자")
+
+        def _tag(text):
+            has_main = any(m in text for m in main_markers)
+            has_comp = any(m in text for m in comp_markers)
+            if has_main and not has_comp:
+                return "main"
+            if has_comp and not has_main:
+                return "comp"
+            return "mixed"
+
+        tags = {a: _tag(r) for a, r in roles.items()}
+        tagset = set(tags.values())
+
+        # main + comp 조합이면 2명 유지 허용
+        if "main" in tagset and "comp" in tagset and len(speakers) == 2:
+            return
+
+        # 그 외: 1명으로 축소. keeper 선정 우선순위:
+        #   1) tag == "main" 인 AI (설명·질문 주도)
+        #   2) 없으면 LLM이 먼저 선정한 순서상 첫 번째
+        keeper = None
+        for a in speakers:
+            if tags.get(a) == "main":
+                keeper = a
+                break
+        if keeper is None:
+            keeper = speakers[0]
+
+        dropped = [a for a in speakers if a != keeper]
+        for a in dropped:
+            decision[f"{a}_directive"] = None
+        decision["speaking_agents"] = [keeper]
+        print(f"       · [single-speaker-cap] {speakers} → [{keeper}] "
+              f"(tags={tags}, dropped={dropped})")
+
     def _stage_complete_safety_net(self, decision, user_utterance):
         """LLM이 stage_complete=false로 내려도, 학습자 발화(+최근 합산)가
         명백히 완료 기준을 만족하면 true로 덮어쓴다.
@@ -928,6 +986,7 @@ class CollaborativeSession:
                 "strategy": "타임아웃 기본",
             }
             self._enforce_rotation_guard(decision)
+            self._cap_single_speaker(decision)  # 기본 1명 발화 강제
             self._stage_complete_safety_net(decision, user_utterance)
             # fallback 경로에서도 2단계 게이트 적용 (조건 충족 시 바로 advance 방지)
             self._apply_stage_gate(decision, user_utterance)
@@ -979,6 +1038,7 @@ class CollaborativeSession:
                 aid for aid in self.AI_KEYS if decision.get(f"{aid}_directive")
             ]
         self._enforce_rotation_guard(decision)
+        self._cap_single_speaker(decision)  # 기본 1명 발화 강제 (rotation 후 단계)
         # stage_complete 안전망: LLM이 false여도 명시적 완료 기준을 충족하면 true로 교정
         self._stage_complete_safety_net(decision, user_utterance)
 
@@ -1174,15 +1234,28 @@ class CollaborativeSession:
                         "- 교과서 정의를 그대로 인용하지 말고 학생 말투로 풀어 쓸 것.\n"
                         "- 반드시 문장 종결 어미(~야/어/지/까/래/해 등)로 끝맺을 것.\n"
                     )
+                    full2 = ""
                     try:
                         raw2 = self.api.call(prompt + retry_note, max_tokens=480, temperature=1.0)
                         full2 = sanitize_ai_output(raw2)
-                        if not _is_incomplete_utterance(full2) or len(full2) > len(full):
-                            # 전체 버블 내용 교체
-                            full = full2
-                            # UI에 이미 보낸 partial을 덮어쓰기 위해 done에서 최종값 전달
                     except Exception as e:
                         print(f"       · [ai_stream {aid}] 재시도 실패: {e}")
+
+                    # 최선 선택: full2가 완결이면 무조건 full2. 아니면 더 긴 쪽.
+                    best = None
+                    if full2 and not _is_incomplete_utterance(full2):
+                        best = full2
+                    elif full and not _is_incomplete_utterance(full):
+                        best = full
+                    else:
+                        # 둘 다 불완결 — 원본/재시도 중 더 긴 쪽 + 강제 종결 어미 부착
+                        candidate = full2 if len(full2) > len(full) else full
+                        if candidate:
+                            # 문장 중간일 가능성 → 마지막 음절 뒤 "... (생성 중 끊김)" 추가
+                            best = candidate.rstrip() + "... _(생성 중 끊김)_"
+                        else:
+                            best = "(발화를 생성하지 못했어요)"
+                    full = best
 
                 if not started:
                     q.put(("start", aid, ""))

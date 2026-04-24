@@ -315,8 +315,20 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                                   "content": _system_bubble("모든 stage가 이미 완료되었습니다.")}]
         return history
 
-    with gr.Blocks(title="협력학습 세션", theme=gr.themes.Soft()) as demo:
-        gr.Markdown(f"# {session.task['task_title']}")
+    # 버전 표시 (lib/__init__.py의 __version__ 단일 소스)
+    try:
+        from . import __version__ as _app_version
+    except Exception:
+        _app_version = "v?.??"
+
+    with gr.Blocks(title=f"협력학습 세션 {_app_version}", theme=gr.themes.Soft()) as demo:
+        gr.Markdown(
+            f"# {session.task['task_title']}   "
+            f"<span style='font-size:0.55em; color:#888; font-weight:400; "
+            f"background:#f0f0f0; padding:3px 8px; border-radius:10px; "
+            f"margin-left:8px; vertical-align:middle;'>"
+            f"⚙️ {_app_version}</span>"
+        )
         with gr.Row():
             with gr.Column(scale=3):
                 chatbot = gr.Chatbot(
