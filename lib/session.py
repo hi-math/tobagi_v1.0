@@ -1139,7 +1139,7 @@ class CollaborativeSession:
             """
             if not s:
                 return True
-            stripped = s.strip().rstrip('"\'」』")
+            stripped = s.strip().rstrip('"\'」』')
             if len(stripped) < 20:
                 return True
             # 한글 종결 어미·문장부호로 끝나면 완결
