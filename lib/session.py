@@ -580,14 +580,11 @@ class CollaborativeSession:
                          user_mode="collaborator", silence_trigger=False,
                          user_silence_seconds=0.0):
         persona = self.config["personas"]["ai_students"][student_key]
-        # 발화 생성엔 말투·역할·성격만 필요. initial_self_efficacy/initial_learner_state는 제외
-        # (실시간 learner_state는 별도 주입되므로 중복 토큰 낭비).
+        # 발화 생성엔 말투·역할만 필수. JSON 덩어리를 줄여 TTFT 단축.
         persona_slim = {
             "name": persona.get("name"),
             "level": persona.get("level"),
             "role": persona.get("role"),
-            "description": persona.get("description"),
-            "traits": persona.get("traits", {}),
             "speech_style": persona.get("speech_style"),
         }
         stage = self.current_stage_info()
@@ -595,7 +592,8 @@ class CollaborativeSession:
         return render_prompt(self.prompts["ai_student"], {
             "student_name": persona["name"],
             "my_persona": persona_slim,
-            "my_learner_state": self._flatten_lm(self.learner_models[student_key]),
+            # 자신의 full 학습자모델은 발화에 거의 영향 없음 → 생략해 토큰 절감
+            "my_learner_state": "(간략화: 페르소나 참조)",
             "stage_title": stage["title"],
             "stage_prompt": stage["prompt"],
             "role": directive.get("role", ""),
@@ -605,7 +603,7 @@ class CollaborativeSession:
             "user_mode": user_mode,
             "silence_trigger": str(bool(silence_trigger)).lower(),
             "user_silence_seconds": f"{user_silence_seconds:.0f}",
-            "recent_dialogue": self.recent_dialogue(8),
+            "recent_dialogue": self.recent_dialogue(4),  # 8→4 턴
             "user_utterance": user_utterance,
         })
 

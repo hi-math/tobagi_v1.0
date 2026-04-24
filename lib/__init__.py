@@ -88,9 +88,9 @@ def bootstrap(base_path, api_key, model=None, provider="gemini",
 
     provider = (provider or "gemini").lower()
     if provider == "gemini":
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        api = GeminiAPI(model=model or DEFAULT_GEMINI_FLASH)
+        # 신규 SDK `google-genai` 사용. Client 생성자에 직접 api_key를 주입.
+        # Colab의 구 `google.generativeai` import hook 이슈(localhost Read timeout)를 우회.
+        api = GeminiAPI(model=model or DEFAULT_GEMINI_FLASH, api_key=api_key)
     elif provider in ("anthropic", "claude"):
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)

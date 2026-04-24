@@ -78,33 +78,50 @@ class ClaudeAPI:
 
 
 class GeminiAPI:
-    """google-generativeai 클라이언트를 래핑한 얇은 API 헬퍼.
+    """google-genai (신규 공식 SDK) 클라이언트를 래핑한 얇은 API 헬퍼.
+
+    중요: Colab의 구 `google.generativeai` 전용 import hook이 로컬 프록시로
+    라우팅하는 문제(localhost:44179 Read timeout) 를 피하려고 **신규 SDK만**
+    사용한다. 설치: `pip install google-genai` (기존 `google-generativeai` 아님).
 
     인터페이스는 ClaudeAPI와 동일:
-        call(prompt, max_tokens=..., temperature=..., model=None, stream=False) -> str
+        call(prompt, max_tokens=..., temperature=..., model=None, stream=False,
+             json_mode=False) -> str
         call(..., stream=True) -> Iterator[str]
 
-    사전 조건: `genai.configure(api_key=...)` 가 이미 호출되어 있어야 한다.
-    bootstrap()이 이 초기화를 대신 해준다.
-
     노트:
-    - Gemini SDK는 `max_output_tokens`, `temperature`를 generation_config로 받는다.
-    - 스트리밍: `model.generate_content(prompt, stream=True)` → chunk.text 이터레이터.
-    - 모델 인스턴스는 model 이름마다 캐시해 재사용 (호출마다 만들면 오버헤드).
+    - 신규 SDK는 `google.genai.Client(api_key=...)`로 초기화하고 인스턴스를 보관.
+    - 동기 호출:   client.models.generate_content(model=..., contents=..., config=...)
+    - 스트리밍:   client.models.generate_content_stream(model=..., contents=..., config=...)
+    - config는 `google.genai.types.GenerateContentConfig(...)`.
     """
 
     provider = "gemini"
 
-    def __init__(self, model=DEFAULT_GEMINI_FLASH):
-        import google.generativeai as genai  # 지연 임포트
-        self._genai = genai
+    def __init__(self, model=DEFAULT_GEMINI_FLASH, api_key=None):
+        try:
+            from google import genai as _genai
+            from google.genai import types as _types
+        except ImportError as e:
+            raise ImportError(
+                "google-genai 패키지가 필요합니다. Colab에서 "
+                "`!pip install google-genai -q` 를 먼저 실행하세요. "
+                f"(원본: {e})"
+            )
+        self._genai = _genai
+        self._types = _types
         self.model = model
-        self._model_cache = {}  # model_name -> GenerativeModel
+        # api_key=None이면 google-genai가 GOOGLE_API_KEY / GEMINI_API_KEY 환경변수를 찾음.
+        self._client = _genai.Client(api_key=api_key) if api_key else _genai.Client()
 
-    def _get_model(self, name):
-        if name not in self._model_cache:
-            self._model_cache[name] = self._genai.GenerativeModel(name)
-        return self._model_cache[name]
+    def _build_config(self, max_tokens, temperature, json_mode):
+        kwargs = {
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if json_mode:
+            kwargs["response_mime_type"] = "application/json"
+        return self._types.GenerateContentConfig(**kwargs)
 
     def call(self, prompt, max_tokens=1000, temperature=0.7, model=None, stream=False,
              json_mode=False):
@@ -112,36 +129,33 @@ class GeminiAPI:
         JSON 블록만 반환하도록 제한한다. extract_json 실패로 fallback 경로가 타는
         것을 막아 레이턴시가 크게 줄어든다."""
         use_model = model or self.model
-        gen_config = {
-            "max_output_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if json_mode:
-            gen_config["response_mime_type"] = "application/json"
-        gm = self._get_model(use_model)
+        config = self._build_config(max_tokens, temperature, json_mode)
         if stream:
-            return self._call_stream(gm, prompt, gen_config)
-        resp = gm.generate_content(prompt, generation_config=gen_config)
-        # 안전 필터 차단 등으로 text 속성이 없을 수 있음 → 폴백
+            return self._call_stream(use_model, prompt, config)
+        resp = self._client.models.generate_content(
+            model=use_model, contents=prompt, config=config,
+        )
+        # 안전 필터 차단 등으로 text 속성이 비어있을 수 있음 → 파트 긁어모으기 폴백
         try:
-            return resp.text
+            text = resp.text
+            if text:
+                return text
         except Exception:
-            # 파트 단위로 긁어모으기
-            parts = []
-            for c in getattr(resp, "candidates", []) or []:
-                content = getattr(c, "content", None)
-                if content and getattr(content, "parts", None):
-                    for p in content.parts:
-                        t = getattr(p, "text", None)
-                        if t:
-                            parts.append(t)
-            if parts:
-                return "".join(parts)
-            # 마지막 수단: 빈 문자열. JSON extract_json이 ValueError를 내줄 것
-            return ""
+            pass
+        parts = []
+        for c in getattr(resp, "candidates", []) or []:
+            content = getattr(c, "content", None)
+            if content and getattr(content, "parts", None):
+                for p in content.parts:
+                    t = getattr(p, "text", None)
+                    if t:
+                        parts.append(t)
+        return "".join(parts) if parts else ""
 
-    def _call_stream(self, gm, prompt, gen_config):
-        resp_iter = gm.generate_content(prompt, generation_config=gen_config, stream=True)
+    def _call_stream(self, model, prompt, config):
+        resp_iter = self._client.models.generate_content_stream(
+            model=model, contents=prompt, config=config,
+        )
         for chunk in resp_iter:
             t = getattr(chunk, "text", None)
             if t:

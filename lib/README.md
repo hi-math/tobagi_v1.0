@@ -35,7 +35,7 @@ team4/
 
 ```python
 # 1. 의존성 + 폰트 + 리포 클론
-!pip install google-generativeai gradio -q
+!pip install google-genai gradio -q
 !apt-get -qq install fonts-nanum
 !git clone -q https://github.com/hi-math/team4.git   # 최초 1회
 
