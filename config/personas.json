@@ -22,11 +22,6 @@
         "math_communication": {
           "expression_clarity": 4,
           "math_vocabulary_use": 4
-        },
-        "math_reasoning": {
-          "justification_quality": 5,
-          "counterexample_handling": 4,
-          "generalization": 4
         }
       },
       "initial_self_efficacy": {
@@ -78,11 +73,6 @@
         "math_communication": {
           "expression_clarity": 4,
           "math_vocabulary_use": 3
-        },
-        "math_reasoning": {
-          "justification_quality": 3,
-          "counterexample_handling": 3,
-          "generalization": 3
         }
       },
       "initial_self_efficacy": {
@@ -136,11 +126,6 @@
         "math_communication": {
           "expression_clarity": 3,
           "math_vocabulary_use": 2
-        },
-        "math_reasoning": {
-          "justification_quality": 2,
-          "counterexample_handling": 2,
-          "generalization": 2
         }
       },
       "initial_self_efficacy": {

@@ -42,8 +42,8 @@ team4/
 # 2. 경로 + 공급자 설정
 BASE_PATH = "team4"
 PROVIDER  = "gemini"                 # "gemini" (무료) / "anthropic"
-MODEL     = "gemini-2.0-flash"       # Gemini 기본 (무료 티어)
-# MODEL   = "gemini-2.5-flash"       # 품질 필요 시 (유료)
+MODEL     = "gemini-2.5-flash"       # Gemini 기본 (2.0은 2026-04부터 신규 유저 차단)
+# MODEL   = "gemini-2.5-flash-lite"  # 더 빠르고 저렴 (분석용 자동 라우팅됨)
 # MODEL   = "claude-haiku-4-5-20251001"  # PROVIDER="anthropic" 선택 시
 
 import sys, os

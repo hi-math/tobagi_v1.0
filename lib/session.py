@@ -313,38 +313,75 @@ class CollaborativeSession:
         hit_reason = None
 
         if stage == 1:
-            # 경로 A: "약수" + ("2개" or "두개") AND ("3개" or "3 개" or "더 많")
+            # 관대한 통과 기준: 아래 세 경로 중 **하나만** 언급해도 통과.
             has_div = "약수" in combined
-            prime_2 = any(k in combined for k in ["약수가 2개", "약수가 2 개", "약수가 두개",
-                                                   "약수가 두 개", "2개야", "두개야",
-                                                   "정확히 2개", "딱 2개", "딱 두개"])
-            comp_3 = any(k in combined for k in ["3개 이상", "3 개 이상", "세개 이상",
-                                                  "세 개 이상", "2개보다 많", "두개보다 많",
-                                                  "2개 이상", "약수가 많", "4개", "5개", "6개"])
-            if has_div and prime_2 and comp_3:
-                hit_reason = "경로A(약수 2개/3개 이상)"
 
-            # 경로 B: "1과 자기 자신" + "다른 수로 나" or "다른 약수"
-            path_b_prime = any(k in combined for k in [
+            # 경로 A: 약수가 2개 (소수 쪽 단서)
+            path_a = has_div and any(k in combined for k in [
+                "약수가 2개", "약수가 2 개", "약수가 두개", "약수가 두 개",
+                "약수 2개", "약수 두개", "2개야", "두개야",
+                "정확히 2개", "딱 2개", "딱 두개",
+            ])
+            if path_a:
+                hit_reason = "경로A(약수 2개)"
+
+            # 경로 B: 1과 자기 자신만 약수 (소수 정의)
+            path_b = any(k in combined for k in [
                 "1과 자기 자신", "1이랑 자기 자신", "1과 자신",
-                "1, 자기 자신", "1이랑 자기자신",
+                "1, 자기 자신", "1이랑 자기자신", "1과 본인",
+                "자기 자신만", "자기자신만",
             ])
-            path_b_comp = any(k in combined for k in [
-                "다른 수로", "다른 약수", "다른 수도", "또 다른",
-                "외에", "이외", "2로도", "3으로도", "로도 나",
+            if path_b and not hit_reason:
+                hit_reason = "경로B(1과 자기자신 정의)"
+
+            # 경로 C: 약수가 3개 이상 (합성수 쪽 단서)
+            path_c = has_div and any(k in combined for k in [
+                "3개 이상", "3 개 이상", "세개 이상", "세 개 이상",
+                "2개보다 많", "두개보다 많", "약수가 많",
+                "4개", "5개", "6개",
             ])
-            if (path_b_prime and path_b_comp) and not hit_reason:
-                hit_reason = "경로B(나눗셈 정의)"
+            if path_c and not hit_reason:
+                hit_reason = "경로C(약수 3개 이상)"
+
+            # 경로 D: 1·자기자신 외 다른 수로도 나눠진다 (합성수 쪽 단서)
+            path_d = any(k in combined for k in [
+                "다른 수로", "다른 약수", "1과 자기자신 이외",
+                "1과 자기 자신 이외", "본인 이외", "자기자신 이외",
+                "2로도", "3으로도", "다른 수도",
+            ])
+            if path_d and not hit_reason:
+                hit_reason = "경로D(1·자기자신 외 약수 존재)"
 
         elif stage == 2:
-            primes = ["31", "37", "41", "43", "47"]
-            hits = sum(1 for p in primes if p in combined)
-            has_strategy = any(k in combined for k in [
-                "나눠", "나누어", "나누기", "2, 3, 5, 7", "2·3·5·7",
-                "체", "에라토스테네스",
+            # 범위 20~30으로 교체. 정답: 23, 29 (둘 다 필요)
+            has_23 = "23" in combined
+            has_29 = "29" in combined
+            # 합성수 오답 포함 여부 — 하나라도 있으면 아직 미완료로 간주
+            composites = ["20", "21", "22", "24", "25", "26", "27", "28", "30"]
+            has_wrong = False
+            for c in composites:
+                # "23"을 "25"로 오판한 경우는 has_29 체크로 잡힘. 여기선
+                # 명시적으로 "<c>는 소수" 류 표현을 추적.
+                if f"{c}은 소수" in combined or f"{c}는 소수" in combined or f"{c}이 소수" in combined:
+                    has_wrong = True
+                    break
+            if has_23 and has_29 and not has_wrong:
+                hit_reason = "Stage2 소수 23·29 둘 다 정확"
+
+        elif stage == 3:
+            # Stage 3: 12 + 13 = 25. 정답 25가 나오거나 (12와 13) 모두 등장 → 완료.
+            has_12 = "12" in combined
+            has_13 = "13" in combined
+            has_25 = any(k in combined for k in ["25", "이십오"])
+            # "합은 25"나 "답은 25" 같은 명시적 계산도 체크
+            explicit_sum = any(k in combined for k in [
+                "합은 25", "합이 25", "답은 25", "답이 25",
+                "12 + 13", "12+13", "12더하기 13", "12 더하기 13",
             ])
-            if hits >= 4 and has_strategy:
-                hit_reason = f"Stage2 소수 {hits}/5 + 판정 근거"
+            if explicit_sum:
+                hit_reason = "Stage3 12+13=25 명시적 계산"
+            elif has_12 and has_13 and has_25:
+                hit_reason = "Stage3 12·13·25 모두 등장"
 
         if hit_reason:
             decision["stage_complete"] = True
@@ -589,11 +626,40 @@ class CollaborativeSession:
         }
         stage = self.current_stage_info()
         directive = directive or {}
+
+        # 이 AI가 알고 있는 체크포인트를 prompt에 주입.
+        # stage['checkpoints']에서 알고 있는 id의 knowledge 문자열을 뽑아 정리.
+        known_cp_lines = []
+        just_learned_cp_lines = []
+        try:
+            from .learner_model import known_checkpoint_ids
+            known_ids = set(known_checkpoint_ids(
+                self.learner_models[student_key], self.current_stage
+            ))
+            just_learned = set(
+                (getattr(self, "_recent_ai_checkpoint_gains", None) or {}).get(student_key, [])
+            )
+            for cp in stage.get("checkpoints") or []:
+                cid = cp.get("id")
+                if cid in known_ids:
+                    marker = "🆕" if cid in just_learned else "•"
+                    known_cp_lines.append(f"  {marker} {cid}: {cp.get('knowledge')}")
+                    if cid in just_learned:
+                        just_learned_cp_lines.append(f"  {cid}: {cp.get('knowledge')}")
+        except Exception:
+            pass
+
+        known_cp_block = "\n".join(known_cp_lines) if known_cp_lines else "  (이 Stage에서 아직 이해한 지식이 없음)"
+        just_learned_block = ("\n".join(just_learned_cp_lines)
+                              if just_learned_cp_lines else "(없음)")
+
         return render_prompt(self.prompts["ai_student"], {
             "student_name": persona["name"],
             "my_persona": persona_slim,
             # 자신의 full 학습자모델은 발화에 거의 영향 없음 → 생략해 토큰 절감
             "my_learner_state": "(간략화: 페르소나 참조)",
+            "my_known_checkpoints": known_cp_block,
+            "my_just_learned_checkpoints": just_learned_block,
             "stage_title": stage["title"],
             "stage_prompt": stage["prompt"],
             "role": directive.get("role", ""),
@@ -616,7 +682,8 @@ class CollaborativeSession:
             silence_trigger=silence_trigger,
             user_silence_seconds=user_silence_seconds,
         )
-        raw = self.api.call(prompt, max_tokens=220, temperature=0.9)
+        # max_tokens=480: 한글 2~4문장이 잘리지 않게 여유 있게 설정
+        raw = self.api.call(prompt, max_tokens=480, temperature=0.9)
         return sanitize_ai_output(raw)
 
     def analyze_and_decide(self, user_utterance):
@@ -745,6 +812,73 @@ class CollaborativeSession:
         self._enforce_rotation_guard(decision)
         # stage_complete 안전망: LLM이 false여도 명시적 완료 기준을 충족하면 true로 교정
         self._stage_complete_safety_net(decision, user_utterance)
+
+        # --- CPS 태그 반영 (analyze_and_decide가 piggyback으로 태깅) ---
+        cps_tags_raw = analysis.get("cps_tags") or []
+        if cps_tags_raw:
+            try:
+                from .learner_model import apply_cps_tags
+                gained = apply_cps_tags(
+                    self.learner_models["user"],
+                    {"tags": cps_tags_raw, "none": False},
+                    stage=self.current_stage,
+                    turn=self.turn_count,
+                )
+                if gained:
+                    print(f"       · [cps] +{gained} 태그 반영 ({[t.get('dimension') for t in cps_tags_raw]})")
+            except Exception as e:
+                print(f"       · [cps] 태그 반영 실패: {e}")
+
+        # --- self-efficacy 신호 반영 (발화 tone 기반 ±1) ---
+        se_signals = analysis.get("self_efficacy_delta") or []
+        if se_signals:
+            try:
+                from .learner_model import apply_self_efficacy_signal
+                applied = apply_self_efficacy_signal(
+                    self.learner_models["user"],
+                    se_signals,
+                    stage=self.current_stage,
+                    turn=self.turn_count,
+                )
+                if applied:
+                    deltas = [f"{s.get('item_id')}{'+' if s.get('delta',0)>0 else ''}{s.get('delta')}" for s in se_signals]
+                    print(f"       · [se] {applied}건 반영 ({deltas})")
+            except Exception as e:
+                print(f"       · [se] 신호 반영 실패: {e}")
+
+        # --- 체크포인트 적용 + AI 전파 ---
+        checkpoint_hits = analysis.get("checkpoint_hits") or []
+        if checkpoint_hits:
+            try:
+                from .learner_model import (
+                    apply_checkpoint_hits, propagate_checkpoints_to_ai,
+                )
+                new_user = apply_checkpoint_hits(
+                    self.learner_models["user"], checkpoint_hits,
+                    stage=self.current_stage, turn=self.turn_count, source="user",
+                )
+                if new_user:
+                    print(f"       · [checkpoint] user +{new_user}: {checkpoint_hits}")
+
+                ai_levels = {
+                    aid: self.config["personas"]["ai_students"][aid].get("level", "중")
+                    for aid in self.AI_KEYS
+                    if aid in self.config["personas"]["ai_students"]
+                }
+                newly_learned = propagate_checkpoints_to_ai(
+                    self.learner_models, checkpoint_hits,
+                    stage=self.current_stage, turn=self.turn_count,
+                    ai_levels=ai_levels,
+                )
+                # 방금 학습한 AI가 있으면 전역 기록 + 로그 (다음 발화에서 활용)
+                self._recent_ai_checkpoint_gains = newly_learned
+                for aid, cps in newly_learned.items():
+                    if cps:
+                        name = self.config["personas"]["ai_students"][aid].get("name", aid)
+                        print(f"       · [checkpoint→AI] {name}({ai_levels.get(aid)}) 학습: {cps}")
+            except Exception as e:
+                print(f"       · [checkpoint] 반영 실패: {e}")
+
         self.last_tutor_decision = decision
         return {"analysis": analysis, "decision": decision}
 
@@ -844,8 +978,9 @@ class CollaborativeSession:
             started = False
             buf = []
             try:
+                # max_tokens=480: 한글 2~4문장이 중간에서 잘리지 않도록 여유 부여
                 stream = self.api.call(
-                    prompt, max_tokens=220, temperature=0.9, stream=True,
+                    prompt, max_tokens=480, temperature=0.9, stream=True,
                 )
                 for chunk in stream:
                     if not chunk:
@@ -969,6 +1104,18 @@ class CollaborativeSession:
         # 의도적으로 opener를 바꾸면 각 Stage 시작 지점에서 발화자가 다양해진다.
         persona = self.config["personas"]["ai_students"][opener_key]
         stage = self.current_stage_info()
+
+        # 교사 주도 intro_message가 정의되어 있으면, 학생 대화의 문맥에 정의를
+        # 공식화해 전달한다. (Stage 2 시작 시 소수·합성수 정의 제시용)
+        intro_msg = stage.get("intro_message")
+        if intro_msg:
+            self.conversation.append({
+                "speaker": "📘 수업 안내",
+                "content": intro_msg,
+                "stage": self.current_stage,
+                "system": True,
+            })
+
         prompt = render_prompt(self.prompts["stage_intro"], {
             "opener_name": persona["name"],
             "stage_title": stage["title"],
@@ -977,13 +1124,17 @@ class CollaborativeSession:
             "my_persona": persona,
             "domain_knowledge": self._domain_text(),
         })
-        raw = self.api.call(prompt, max_tokens=180, temperature=0.8)
+        # stage_intro는 짧지만 막히지 않을 정도로 여유 (max_tokens=360)
+        raw = self.api.call(prompt, max_tokens=360, temperature=0.8)
         text = sanitize_ai_output(raw)
         self.conversation.append({
             "speaker": persona["name"],
             "content": text,
             "stage": self.current_stage,
         })
+        # intro_message가 있으면 함께 반환 (UI에서 두 버블로 렌더링 가능)
+        if intro_msg:
+            return f"[📘 수업 안내]\n{intro_msg}\n\n---\n\n{text}"
         return text
 
 

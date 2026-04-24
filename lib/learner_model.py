@@ -1,9 +1,11 @@
-"""학습자 모델 인스턴스 생성 및 업데이트 로직 (v2.0).
+"""학습자 모델 인스턴스 생성 및 업데이트 로직 (v2.1).
 
-스키마: config/learner_model.json (schema_version >= 2.0)
-  - 인지: task_achievement, math_communication, math_reasoning
+스키마: config/learner_model.json (schema_version >= 2.1)
+  - 인지: task_achievement, math_communication
   - 정의: cps, self_efficacy
   - extension_slot: +α placeholder
+
+v2.1 변경: math_reasoning 모델 제거 (추론 구인은 task_achievement 루브릭에 흡수)
 
 인스턴스 구조:
   {
@@ -150,7 +152,49 @@ def create_learner_model_instance(config, student_name,
 
         inst["models"][mk] = model_cells
 
+    # 체크포인트 진행도 초기화 (Stage별 빈 dict)
+    inst["checkpoint_progress"] = {"1": {}, "2": {}, "3": {}}
+    # 하위 수준 AI의 '지연 학습'을 위한 관찰 카운터
+    inst["_checkpoint_obs_count"] = {"1": {}, "2": {}, "3": {}}
+
     return inst
+
+
+# AI 학생의 level별 초기 체크포인트 지식 시딩.
+# 상(민준): 거의 전부 알고 있음 — 개념 설명자 역할
+# 중(서연): 필수만 — 진행자, 학습자와 비슷한 수준에서 정리·연결
+# 하(연우): 어휘(s1-1)만 — 질문자, 학습 과정에서 성장
+_AI_INITIAL_CHECKPOINTS_BY_LEVEL = {
+    "상": {
+        "1": ["s1-1", "s1-2", "s1-3", "s1-4", "s1-5", "s1-6"],
+        "2": ["s2-1", "s2-2", "s2-3", "s2-4", "s2-5", "s2-6", "s2-7", "s2-8"],
+        "3": ["s3-1", "s3-2", "s3-3", "s3-4", "s3-5", "s3-6", "s3-7", "s3-8"],
+    },
+    "중": {
+        "1": ["s1-1", "s1-2", "s1-3"],
+        "2": ["s2-1", "s2-2", "s2-3", "s2-4"],
+        "3": ["s3-1", "s3-2", "s3-3"],
+    },
+    "하": {
+        "1": ["s1-1"],
+        "2": [],
+        "3": [],
+    },
+}
+
+
+def _seed_ai_checkpoints(inst, level):
+    """AI 학생의 학습자 모델에 level별 초기 체크포인트 지식 설정."""
+    prior = _AI_INITIAL_CHECKPOINTS_BY_LEVEL.get(level, _AI_INITIAL_CHECKPOINTS_BY_LEVEL["중"])
+    prog = inst.setdefault("checkpoint_progress", {"1": {}, "2": {}, "3": {}})
+    for stage_key, cp_ids in prior.items():
+        stage_prog = prog.setdefault(stage_key, {})
+        for cid in cp_ids:
+            stage_prog[cid] = {
+                "hit": True,
+                "first_seen_turn": 0,
+                "source": "prior",   # 초기 사전지식
+            }
 
 
 def init_learners(config):
@@ -168,7 +212,84 @@ def init_learners(config):
             override_initial=info.get("initial_learner_state"),
             override_self_efficacy=info.get("initial_self_efficacy"),
         )
+        # AI 체크포인트 사전지식 시딩
+        _seed_ai_checkpoints(learners[aid], info.get("level", "중"))
     return learners
+
+
+# ----- 체크포인트 적용·전파 -----
+
+def apply_checkpoint_hits(inst, hit_ids, stage, turn=None, source="user"):
+    """사용자의 이번 발화에서 탐지된 체크포인트 id들을 학습자 모델에 기록.
+    중복은 무시 (idempotent). 처음 포착된 것만 카운트해 반환.
+    """
+    if not hit_ids:
+        return 0
+    prog = inst.setdefault("checkpoint_progress", {"1": {}, "2": {}, "3": {}})
+    stage_prog = prog.setdefault(str(stage), {})
+    added = 0
+    for cid in hit_ids:
+        if cid not in stage_prog:
+            stage_prog[cid] = {
+                "hit": True,
+                "first_seen_turn": turn,
+                "source": source,
+            }
+            added += 1
+    return added
+
+
+def propagate_checkpoints_to_ai(learner_models, hit_ids, stage, turn, ai_levels):
+    """사용자가 이번 턴에 hit한 체크포인트를 AI 학생들에게 level별 규칙으로 전파.
+
+    규칙 (peer learning simulation):
+      - 상(민준): 이미 알고 있음 (source="prior"로 seed됨) → 추가 기록 없음
+      - 중(서연): 첫 관찰 즉시 학습 (source="observed")
+      - 하(연우): 누적 관찰 2회 이상이면 학습 (source="learned")
+
+    반환: {aid: [새로 hit된 cp_id, ...]} — 방금 학습한 체크포인트 목록
+    """
+    newly_learned = {aid: [] for aid in ai_levels.keys()}
+    if not hit_ids:
+        return newly_learned
+
+    stage_key = str(stage)
+
+    for aid, level in ai_levels.items():
+        inst = learner_models.get(aid)
+        if not inst:
+            continue
+        prog = inst.setdefault("checkpoint_progress", {"1": {}, "2": {}, "3": {}})
+        stage_prog = prog.setdefault(stage_key, {})
+        obs_root = inst.setdefault("_checkpoint_obs_count", {"1": {}, "2": {}, "3": {}})
+        obs_stage = obs_root.setdefault(stage_key, {})
+
+        for cid in hit_ids:
+            if cid in stage_prog:
+                continue  # 이미 알고 있음
+
+            if level == "상":
+                # 개념 설명자는 기본적으로 알고 있으나, 시딩에서 누락된 경우를 대비해 즉시 기록.
+                stage_prog[cid] = {"hit": True, "first_seen_turn": turn, "source": "observed"}
+                newly_learned[aid].append(cid)
+            elif level == "중":
+                stage_prog[cid] = {"hit": True, "first_seen_turn": turn, "source": "observed"}
+                newly_learned[aid].append(cid)
+            elif level == "하":
+                obs_stage[cid] = obs_stage.get(cid, 0) + 1
+                if obs_stage[cid] >= 2:
+                    stage_prog[cid] = {
+                        "hit": True, "first_seen_turn": turn, "source": "learned",
+                        "obs_count": obs_stage[cid],
+                    }
+                    newly_learned[aid].append(cid)
+    return newly_learned
+
+
+def known_checkpoint_ids(inst, stage):
+    """stage 기준으로 이 학습자가 '알고 있다고 볼 수 있는' cp_id 리스트."""
+    prog = (inst.get("checkpoint_progress") or {}).get(str(stage)) or {}
+    return [cid for cid, v in prog.items() if isinstance(v, dict) and v.get("hit")]
 
 
 # ----- 업데이트 헬퍼 -----
@@ -270,7 +391,7 @@ def apply_analysis_updates(inst, analysis_result, stage, turn=None, schema=None)
         })
 
 
-def apply_cps_tags(inst, tags_result, stage, turn=None, min_confidence=0.6):
+def apply_cps_tags(inst, tags_result, stage, turn=None, min_confidence=0.4):
     """08_cps_tagging.md 응답 JSON을 인스턴스에 반영(카운터 +1 가산).
 
     tags_result 형식:
@@ -350,6 +471,55 @@ def apply_self_efficacy_responses(inst, responses, timestamp=None):
         })
         written += 1
     return written
+
+
+def apply_self_efficacy_signal(inst, signal_list, stage, turn=None):
+    """Live 세션용: analyze_and_decide가 뽑아낸 self_efficacy_delta 리스트를
+    반영한다. Bandura 권고상 자기보고가 원칙이지만 데모 파이프라인에서 설문 UI가
+    없을 때 LLM이 발화 tone에서 추론한 신호로 pre 값을 움직여 시각적 변화를 낸다.
+
+    signal_list 형식:
+      [{"item_id": "se_02", "delta": +1, "reason": "..."}]
+
+    적용 규칙:
+      - delta는 -1 / +1만 허용 (그 외는 clip).
+      - pre 값이 null이면 기본 2(약간 자신 없음)에서 출발해 적용.
+      - 최종값은 1~4 범위로 clip.
+      - history에 {stage, phase='live', value, delta, reason, turn} append.
+    반환: 적용된 signal 수.
+    """
+    se = inst["models"].get("self_efficacy")
+    if not se or not isinstance(signal_list, list):
+        return 0
+
+    applied = 0
+    for sig in signal_list:
+        iid = sig.get("item_id")
+        if iid not in se:
+            continue
+        try:
+            delta = int(sig.get("delta", 0))
+        except (TypeError, ValueError):
+            continue
+        if delta == 0:
+            continue
+        delta = max(-1, min(1, delta))  # ±1로 clip
+
+        cur = se[iid].get("pre")
+        if cur is None:
+            cur = 2
+        new_val = max(1, min(4, int(cur) + delta))
+        se[iid]["pre"] = new_val  # pre 값을 현재값으로 업데이트 (live 추적)
+        se[iid].setdefault("history", []).append({
+            "stage": stage,
+            "phase": "live",
+            "value": new_val,
+            "delta": delta,
+            "reason": sig.get("reason", ""),
+            "turn": turn,
+        })
+        applied += 1
+    return applied
 
 
 # ----- 파생값 유틸 (시각화에서 재사용) -----

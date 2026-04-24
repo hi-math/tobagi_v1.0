@@ -50,15 +50,83 @@ def print_user_model(config, learner_models):
 # 레이더 차트
 # --------------------------------------------------------------------
 
-def radar_figure(config, learner_models):
-    """사용자의 학습자 모델을 레이더로 표시. Figure 반환."""
-    labels, vals = [], []
-    for mk, mv in config["learner_model_schema"]["models"].items():
-        for dk, dv in (mv.get("dimensions") or {}).items():
-            v = learner_models["user"]["models"][mk][dk]["value"]
+def _aggregate_model_score(mk, model_def, user_models_inst):
+    """한 최상위 학습자 모델을 1~5 스케일 단일 점수로 축약.
+
+    규칙:
+      - task_achievement    : stage_level(A~E) → 5~1. null이면 None.
+      - math_communication  : 하위 ordinal(1~5) 평균.
+      - cps                 : 4개 counter를 derived_level_thresholds로 1~5 변환 후 평균.
+      - self_efficacy       : 8개 items의 pre 값(1~4) 평균 → 1~5 선형 매핑.
+    반환: float 또는 None (데이터 없음).
+    """
+    cells = user_models_inst.get(mk) or {}
+    if mk == "task_achievement":
+        cell = cells.get("stage_level") or {}
+        # per_stage_values 중 최신 stage 우선, 없으면 현재 value
+        psv = cell.get("per_stage_values") or {}
+        grade = cell.get("value")
+        if not grade and psv:
+            latest_stage = max(psv.keys(), key=lambda s: int(s))
+            grade = psv[latest_stage]
+        score = _stage_grade_to_score(grade)
+        return float(score) if score is not None else None
+
+    if mk == "math_communication":
+        vals = []
+        for dk, dv in (model_def.get("dimensions") or {}).items():
+            v = (cells.get(dk) or {}).get("value")
             if isinstance(v, (int, float)):
-                labels.append(dv["name"])
-                vals.append(v)
+                vals.append(float(v))
+        return sum(vals) / len(vals) if vals else None
+
+    if mk == "cps":
+        levels = []
+        for dk, dv in (model_def.get("dimensions") or {}).items():
+            c = (cells.get(dk) or {}).get("value")
+            thr = dv.get("derived_level_thresholds") or {}
+            lv = _counter_to_level(c, thr)
+            if lv is not None:
+                levels.append(float(lv))
+        return sum(levels) / len(levels) if levels else None
+
+    if mk == "self_efficacy":
+        # items별 pre 평균 (1~4) → 1~5로 선형: (x-1)*(4/3)+1
+        pres = []
+        for iid, cell in cells.items():
+            if isinstance(cell, dict):
+                v = cell.get("pre")
+                if isinstance(v, (int, float)):
+                    pres.append(float(v))
+        if not pres:
+            return None
+        avg = sum(pres) / len(pres)
+        return (avg - 1.0) * (4.0 / 3.0) + 1.0
+
+    # 기타: ordinal 하위 차원 평균 (extension_slot 등)
+    vals = []
+    for dk, dv in (model_def.get("dimensions") or {}).items():
+        v = (cells.get(dk) or {}).get("value")
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
+    return sum(vals) / len(vals) if vals else None
+
+
+def radar_figure(config, learner_models):
+    """사용자의 학습자 모델을 **최상위 모델 4개** 스케일로 축약해 레이더로 표시.
+
+    축: task_achievement / math_communication / cps / self_efficacy
+    하위 차원은 학습자 모델 패널에서 따로 본다.
+    """
+    schema = config["learner_model_schema"]["models"]
+    user_models = learner_models["user"]["models"]
+
+    labels, vals = [], []
+    for mk, mv in schema.items():
+        score = _aggregate_model_score(mk, mv, user_models)
+        labels.append(mv.get("name", mk))
+        # 데이터 없음은 0으로 표시 (축이 비면 차트가 깨지므로)
+        vals.append(score if score is not None else 0.0)
 
     N = len(labels)
     angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
@@ -66,13 +134,23 @@ def radar_figure(config, learner_models):
     vals_plot = vals + vals[:1]
 
     fig, ax = plt.subplots(figsize=(7, 7), subplot_kw=dict(polar=True))
-    ax.plot(angles, vals_plot, "o-", linewidth=2, color="#E74C3C")
-    ax.fill(angles, vals_plot, alpha=0.2, color="#E74C3C")
+    ax.plot(angles, vals_plot, "o-", linewidth=2.5, color="#E74C3C")
+    ax.fill(angles, vals_plot, alpha=0.22, color="#E74C3C")
+
+    # 각 꼭짓점에 점수 숫자 표시 (시각적 피드백 강화)
+    for ang, lb, v in zip(angles[:-1], labels, vals):
+        if v > 0:
+            ax.text(ang, v + 0.25, f"{v:.1f}", ha="center", va="center",
+                    fontsize=10, fontweight="bold", color="#C0392B")
+
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels(labels, size=9)
+    ax.set_xticklabels(labels, size=11, fontweight="bold")
     ax.set_ylim(0, 5)
     ax.set_yticks([1, 2, 3, 4, 5])
-    ax.set_title("사용자 학습자 모델 (Radar)", size=13, pad=20, fontweight="bold")
+    ax.set_yticklabels(["1", "2", "3", "4", "5"], size=8, color="#888")
+    ax.set_title("사용자 학습자 모델 — 4개 영역 (하위요소는 패널 참고)",
+                 size=12, pad=22, fontweight="bold")
+    ax.grid(True, alpha=0.4)
     fig.tight_layout()
     return fig
 
@@ -176,7 +254,6 @@ def user_model_markdown(config, learner_models):
         ## 인지적 요소
           ▸ 과제 수행도달 (stage별 A~E → 점수 변환)
           ▸ 수학적 의사소통 (하위요소 2개 점수)
-          ▸ 수학적 추론 (하위요소 3개 점수)
         ## 정의적 요소
           ▸ 협력적 문제해결 (CPS 하위구인 4개: 카운터 + 파생 레벨)
           ▸ 수학 자기효능감 (문항별 pre/post 또는 평균)
@@ -301,6 +378,60 @@ def user_model_markdown(config, learner_models):
                     lines.append(f"- 📋 자기효능감 평균 — pre {pre_s} → post {post_s}{delta_s}")
                 else:
                     lines.append(f"- 📋 자기효능감 평균 — _(아직 응답 없음)_")
+
+    # === 체크포인트 진행도 섹션 ===
+    lines.append("\n#### 🎯 체크포인트 진행도")
+    lines.append("_Stage별 학습자 발화에서 포착되어야 할 지식 단위. 사용자와 AI 학생 각각의 이해 상태를 기록한다._\n")
+
+    tasks = config.get("tasks") or {}
+    stages = tasks.get("stages") or {}
+
+    PRIORITY_EMOJI = {"필수": "🔴", "권장": "🟡", "보너스": "🟢"}
+    SOURCE_EMOJI = {"user": "✅", "prior": "📚", "observed": "👁", "learned": "💡"}
+
+    # 사용자 + 3 AI의 체크포인트 진행도를 나란히 표시
+    learner_order = [
+        ("user", learner_models.get("user", {}).get("student_name", "사용자")),
+    ]
+    for aid in ("ai_1", "ai_2", "ai_3"):
+        if aid in learner_models:
+            name = learner_models[aid].get("student_name", aid)
+            learner_order.append((aid, name))
+
+    for s_key in sorted(stages.keys(), key=lambda x: int(x) if str(x).isdigit() else 99):
+        stage = stages[s_key]
+        cps = stage.get("checkpoints") or []
+        if not cps:
+            continue
+        lines.append(f"\n**Stage {s_key} — {stage.get('title', '')}**")
+
+        # 헤더 행: | 체크포인트 | 사용자 | 민준 | 서연 | 연우 |
+        header = "| 체크포인트 | " + " | ".join(n for _, n in learner_order) + " |"
+        sep = "|" + "---|" * (len(learner_order) + 1)
+        lines.append(header)
+        lines.append(sep)
+
+        for cp in cps:
+            cid = cp.get("id", "")
+            prio = cp.get("priority", "")
+            know = cp.get("knowledge", "")
+            prio_e = PRIORITY_EMOJI.get(prio, "⚪")
+            row = [f"{prio_e} `{cid}` {know}"]
+            for lk, _name in learner_order:
+                prog = (learner_models.get(lk, {}).get("checkpoint_progress") or {}).get(s_key) or {}
+                cell = prog.get(cid)
+                if cell and cell.get("hit"):
+                    src = cell.get("source", "user")
+                    emo = SOURCE_EMOJI.get(src, "✅")
+                    row.append(emo)
+                else:
+                    row.append("⬜")
+            lines.append("| " + " | ".join(row) + " |")
+
+    lines.append(
+        "\n> 범례: 🔴필수 · 🟡권장 · 🟢보너스 | "
+        "✅사용자 발화로 포착 · 📚사전지식 · 👁관찰 학습(즉시) · 💡반복 관찰로 학습 · ⬜미포착"
+    )
 
     lines.append(
         f"\n> _1~5 점수는 루브릭 해석 수준을 의미합니다. "
