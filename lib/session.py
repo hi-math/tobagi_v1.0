@@ -1153,11 +1153,10 @@ class CollaborativeSession:
         # anthropic은 이미 Haiku(기본)라 오버라이드 불필요
 
         def _invoke():
-            # max_tokens=700: JSON에 analysis(updates/misconc/cps_tags/checkpoint_hits/
-            # self_efficacy_delta/stage_level_estimate/observation_summary) + decision 까지
-            # 모두 담아야 하므로 여유 있게. 이전 400은 끝의 checkpoint_hits/se_delta가
-            # 잘릴 가능성.
-            return self.api.call(prompt, max_tokens=700, temperature=0.4,
+            # max_tokens=550: 레이턴시 단축. 실측상 analysis updates 1~3 +
+            # cps_tags 0~2 + checkpoint_hits 0~3 + decision directive 1개로 충분.
+            # 이전 700은 verbose evidence 텍스트로 부풀려져 발화 응답까지 지연.
+            return self.api.call(prompt, max_tokens=550, temperature=0.4,
                                  model=fast_model, json_mode=use_json_mode)
 
         t0 = time.time()
