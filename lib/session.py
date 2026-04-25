@@ -890,14 +890,24 @@ class CollaborativeSession:
         if not user_utterance:
             return None
 
-        # (A) 짜증 어구
+        # (A) 짜증 어구 — 일반화 패턴 (특정 인사말·서술어 무관)
         frustration_pat = re.compile(
-            r"(했잖아|했다고|했었|방금\s*말|이미\s*말|내가\s*[^?\n]*라고|"
-            r"진짜\s*아까|아까\s*말|또\s*묻|또\s*같은|그건\s*아까|"
-            r"답\s*했|들었잖|봤잖)"
+            r"(했잖아|했다고|했었|했어|"  # ~했어 단언
+            r"라고\s*했|다고\s*했|"        # ~라고 했/~다고 했
+            r"방금\s*말|이미\s*말|"
+            r"내가\s*[^?\n]*라고|"
+            r"진짜\s*아까|아까\s*말|"
+            r"또\s*묻|또\s*같은|또\s*물어|"
+            r"그건\s*아까|"
+            r"답\s*했|들었잖|봤잖|"
+            r"라고요?$|라고\s*했어|다고\s*했어)"  # 발화 끝 "~라고"
         )
         if frustration_pat.search(user_utterance):
             return {"signal": "frustration", "evidence": user_utterance[:60]}
+        # 짧은 발화 끝이 "라고/라고."이면 단독 짜증 시그널
+        stripped = user_utterance.strip().rstrip(".?!").rstrip()
+        if len(stripped) <= 30 and (stripped.endswith("라고") or stripped.endswith("다고")):
+            return {"signal": "frustration", "evidence": stripped}
 
         # (B) 반복 답변 — 최근 사용자 3개 발화에서 핵심 토큰 비교
         recent_user = [user_utterance]
@@ -940,6 +950,69 @@ class CollaborativeSession:
             return {"signal": "repeat", "evidence": ",".join(repeated)}
 
         return None
+
+    # 소수/합성수 식별용 (Stage 1 generalization 체크)
+    _PRIMES_30 = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29}
+    _COMPOSITES_30 = {4, 6, 8, 9, 10, 12, 14, 15, 16, 18, 20, 21, 22, 24, 25, 26, 27, 28}
+
+    def _check_generalization_via_examples(self, stage_num=None):
+        """사용자 최근 발화에서 소수/합성수 예시가 2개 이상 누적되면 일반화 hit.
+
+        s1-2 (소수=약수 2개) 일반화 판정 보강:
+          - 단일 사례 '2의 약수는 2개'만으로는 hit 안 됨
+          - 사용자가 최근 6턴 안에 **서로 다른 소수 2개 이상**을 "약수가 2개"
+            패턴과 함께 발화했으면 일반화로 보고 s1-2 hit
+        s1-3 (합성수=약수 3개+) 동일 로직 적용.
+
+        반환: hit 처리할 cp_id 리스트 (예: ["s1-2"], ["s1-3"], 또는 둘 다).
+        """
+        stage_num = stage_num or self.current_stage
+        if stage_num != 1:
+            return []
+
+        # 최근 사용자 발화 모으기 (최근 6개)
+        recent_user = []
+        for m in reversed(self.conversation[-20:]):
+            if m.get("speaker") == "사용자":
+                recent_user.append(m.get("content", "") or "")
+            if len(recent_user) >= 6:
+                break
+
+        primes_with_2 = set()
+        composites_with_3plus = set()
+
+        for u in recent_user:
+            if not u:
+                continue
+            # "X의 약수는 2개" / "X는 약수가 2개" / "X 약수 2개" — 약수가 X 직후
+            for m in re.finditer(
+                r"(\d+)\s*[은는의이가]?\s*약수[은는이가도]?[^.!?\n]{0,8}?2\s*개", u
+            ):
+                try:
+                    n = int(m.group(1))
+                    if n in self._PRIMES_30:
+                        primes_with_2.add(n)
+                except ValueError:
+                    pass
+            # "X의 약수는 3개~10개" 합성수 패턴
+            for m in re.finditer(
+                r"(\d+)\s*[은는의이가]?\s*약수[은는이가도]?[^.!?\n]{0,8}?([3-9]|10)\s*개", u
+            ):
+                try:
+                    n = int(m.group(1))
+                    if n in self._COMPOSITES_30:
+                        composites_with_3plus.add(n)
+                except ValueError:
+                    pass
+
+        hits = []
+        if len(primes_with_2) >= 2:
+            print(f"       · [generalization] 소수 2+ 예시 누적 → s1-2 hit (예시: {sorted(primes_with_2)})")
+            hits.append("s1-2")
+        if len(composites_with_3plus) >= 2:
+            print(f"       · [generalization] 합성수 2+ 예시 누적 → s1-3 hit (예시: {sorted(composites_with_3plus)})")
+            hits.append("s1-3")
+        return hits
 
     def _next_missing_required(self, stage_num=None):
         """현재 Stage에서 사용자 미달성 필수(prio=필수) 체크포인트 첫 번째 반환.
@@ -1659,6 +1732,11 @@ class CollaborativeSession:
             # 적어도 코드 매칭이라도 작동해야 진척이 멈추지 않음).
             try:
                 kw_hits = self._keyword_match_checkpoints(user_utterance, stage)
+                # 일반화 검증 hits 합치기 (s1-2/s1-3 일반화 누적 사례)
+                gen_hits = self._check_generalization_via_examples()
+                for cid in gen_hits:
+                    if cid not in kw_hits:
+                        kw_hits.append(cid)
                 if kw_hits:
                     from .learner_model import (
                         apply_checkpoint_hits, propagate_checkpoints_to_ai,
@@ -1744,13 +1822,19 @@ class CollaborativeSession:
             llm_hits_early = [llm_hits_early]
         llm_hits_early = [str(h).strip() for h in llm_hits_early if h]
         keyword_hits_early = self._keyword_match_checkpoints(user_utterance, stage)
+        # 일반화 검증 hits — 누적 사례 기반 s1-2/s1-3 추가 hit
+        gen_hits_early = self._check_generalization_via_examples()
         seen_e = set(llm_hits_early)
         merged_hits = list(llm_hits_early)
         for cid in keyword_hits_early:
             if cid not in seen_e:
                 seen_e.add(cid)
                 merged_hits.append(cid)
-        print(f"       · [checkpoint pre-safety_net] llm={llm_hits_early} keyword={keyword_hits_early} merged={merged_hits}")
+        for cid in gen_hits_early:
+            if cid not in seen_e:
+                seen_e.add(cid)
+                merged_hits.append(cid)
+        print(f"       · [checkpoint pre-safety_net] llm={llm_hits_early} keyword={keyword_hits_early} gen={gen_hits_early} merged={merged_hits}")
         if merged_hits:
             try:
                 from .learner_model import (

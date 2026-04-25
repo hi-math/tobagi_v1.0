@@ -116,8 +116,8 @@
       ],
       "checkpoints": [
         {"id": "s1-1", "priority": "권장",  "knowledge": "약수 어휘 사용/이해",                         "detection_hints": ["약수", "나눠떨어지다", "÷", "나누어 떨어"]},
-        {"id": "s1-2", "priority": "필수",  "knowledge": "소수의 약수 개수 = 2개 명시",                 "detection_hints": ["약수가 2개", "약수 두개", "약수 둘", "1과 자기자신", "1과 본인만"]},
-        {"id": "s1-3", "priority": "필수",  "knowledge": "합성수의 약수 개수 = 3개 이상 명시",          "detection_hints": ["약수가 3개", "3개 이상", "약수 여러 개", "다른 약수도"]},
+        {"id": "s1-2", "priority": "필수",  "knowledge": "소수의 약수 개수 = 2개 (일반화)",            "detection_hints": ["소수는 약수가 2개", "소수 약수가 2개", "소수의 약수가 2개", "소수는 약수 두개", "소수는 1과 자기자신", "1과 본인만 약수", "약수가 1과 자기자신만"], "note": "일반화 필요. 단일 예시('2의 약수가 2개')만으로는 hit 안 됨. 코드의 _check_generalization_via_examples가 2+ 소수 예시 누적도 hit 처리."},
+        {"id": "s1-3", "priority": "필수",  "knowledge": "합성수의 약수 개수 = 3개 이상 (일반화)",      "detection_hints": ["합성수는 약수가 3", "합성수 약수가 3", "합성수의 약수가 3", "합성수는 약수가 여러", "합성수는 1과 자기 외", "합성수는 약수 3개"], "note": "일반화 필요. 단일 예시만으로는 hit 안 됨. 코드의 _check_generalization_via_examples가 2+ 합성수 예시 누적도 hit 처리."},
         {"id": "s1-4", "priority": "권장",  "knowledge": "구체 예시로 분류 설명",                       "detection_hints": ["2는 소수", "3은 소수", "5는 소수", "4는 합성수", "6은 합성수"]},
         {"id": "s1-5", "priority": "필수",  "knowledge": "1은 소수도 합성수도 아님을 명시 (이유 불문)",  "detection_hints": ["1은 소수도 합성수도 아니", "1은 둘 다 아니", "1은 예외", "1은 소수 아니", "1은 합성수 아니"]},
         {"id": "s1-6", "priority": "보너스","knowledge": "'1보다 큰 자연수' 전제",                      "detection_hints": ["1보다 큰", "2 이상", "2부터"]}
