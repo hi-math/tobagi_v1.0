@@ -1508,6 +1508,9 @@ class CollaborativeSession:
         # max_tokens=280: 한글 2문장(60~100자)에 충분 + verbose 응답 강제 차단
         raw = self.api.call(prompt, max_tokens=280, temperature=0.9)
         text = sanitize_ai_output(raw)
+        # 진단: 원시 응답 길이/내용 항상 로깅 (폴백 원인 추적)
+        print(f"       · [ai_utterance {student_key}] raw len={len(raw or '')} "
+              f"sanitized len={len(text)} text={text[:80]!r}")
 
         # 약수 나열 위반 시 1회 강제 재생성 (미완결 검사보다 먼저)
         if _ai_lists_divisors(text):
@@ -1627,15 +1630,52 @@ class CollaborativeSession:
                     if best and best[-1] not in ".!?":
                         best = best + "?"
                 else:
-                    # 정말 짧거나 빈 응답 — 페르소나별 generic
-                    generic = {
-                        "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
-                        "ai_2": "잠깐, 지금까지 얘기한 거 정리해볼래?",
-                        "ai_3": "어, 나는 잘 모르겠는데, 같이 볼래?",
-                    }
-                    best = generic.get(student_key, "잠깐, 다시 볼까?")
+                    # 정말 짧거나 빈 응답 — directive 기반 의미있는 fallback
+                    print(f"       · [ai_utterance {student_key}] 모든 재시도 실패 → "
+                          f"directive 기반 templated fallback 사용")
+                    best = self._directive_based_fallback(student_key, directive)
             text = best
         return text
+
+    def _directive_based_fallback(self, student_key, directive):
+        """모든 재시도 실패 시 directive와 next_cp 정보로 의미있는 응답 생성.
+
+        generic 페르소나별 fallback("어디서 막혔어?")이 반복되는 폴백 지옥 방지.
+        next_uncovered_checkpoint의 knowledge를 활용해 그 체크포인트로 향하는
+        구체적 질문을 templated 형태로 생성.
+        """
+        directive = directive or {}
+        # 다음 미달성 체크포인트 식별
+        next_cp = self._next_missing_required()
+        cp_id = (next_cp or {}).get("id", "")
+        cp_know = (next_cp or {}).get("knowledge", "")
+        speech_goal = directive.get("speech_goal", "")
+
+        # 스테이지별 + cp별 안전한 templated 응답
+        # 어떤 경우에도 약수 나열·정의 단언·1의 이유 묻기 안 들어가야
+        if cp_id == "s1-1":
+            return "음, 그럼 약수가 뭔지 같이 살펴볼까?"
+        if cp_id == "s1-2":
+            return "그럼 소수의 약수가 어떤지 한번 같이 정리해볼까?"
+        if cp_id == "s1-3":
+            return "합성수는 약수가 어떨지 한번 생각해볼래?"
+        if cp_id == "s1-4":
+            return "그럼 어떤 수가 소수일지 예시를 같이 들어볼래?"
+        if cp_id == "s1-5":
+            return "1은 그럼 소수야 합성수야?"
+        if cp_id == "s1-6":
+            return "어떤 수부터 시작해서 보면 좋을까?"
+        if cp_id and cp_id.startswith("s2"):
+            return "20부터 30까지 한번 같이 분류해볼까?"
+        if cp_id and cp_id.startswith("s3"):
+            return "10보다 큰 합성수는 뭐가 있을지 같이 봐볼까?"
+        # 페르소나별 안전한 generic (next_cp 정보 없을 때만)
+        persona_fallback = {
+            "ai_1": "음, 어디서 막혔어? 한번 같이 볼까?",
+            "ai_2": "지금까지 얘기한 거 같이 정리해보면 어떨까?",
+            "ai_3": "어, 나는 잘 모르겠는데 어떻게 생각해?",
+        }
+        return persona_fallback.get(student_key, "음, 같이 한번 봐볼까?")
 
     def analyze_and_decide(self, user_utterance):
         stage = self.current_stage_info()
@@ -2038,6 +2078,9 @@ class CollaborativeSession:
                     buf.append(chunk)
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
+                # 진단: 스트림 raw 길이/내용 항상 로깅 (폴백 원인 추적)
+                print(f"       · [ai_stream {aid}] raw chunks={len(buf)} "
+                      f"sanitized len={len(full)} text={full[:80]!r}")
                 # 약수 나열 위반 시 강제 재생성 — incomplete 검사보다 우선
                 if _ai_lists_divisors(full):
                     print(f"       · [ai_stream {aid}] 약수 나열 위반 감지 — 강제 재생성")
@@ -2167,13 +2210,10 @@ class CollaborativeSession:
                             if best and best[-1] not in ".!?":
                                 best = best + "?"
                         else:
-                            # 트림 결과 너무 짧거나 빈 응답 — 페르소나별 generic 질문
-                            generic_by_aid = {
-                                "ai_1": "음, 잠깐 다시 볼까? 어디서 막혔어?",
-                                "ai_2": "잠깐, 지금까지 얘기한 거 정리해보면 어떻게 될까?",
-                                "ai_3": "어, 나는 잘 모르겠는데, 같이 다시 볼래?",
-                            }
-                            best = generic_by_aid.get(aid, "잠깐, 다시 볼까?")
+                            # 트림 결과 너무 짧거나 빈 응답 — directive 기반 fallback
+                            print(f"       · [ai_stream {aid}] 모든 재시도 실패 → "
+                                  f"directive 기반 templated fallback 사용")
+                            best = self._directive_based_fallback(aid, directive)
                     full = best
 
                 if not started:
