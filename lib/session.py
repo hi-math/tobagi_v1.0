@@ -1499,183 +1499,31 @@ class CollaborativeSession:
     def generate_ai_utterance(self, student_key, directive, user_utterance,
                               user_mode="collaborator", silence_trigger=False,
                               user_silence_seconds=0.0):
+        """LLM 호출 → sanitize → 그대로 반환. v1.35: 필터·다단 재시도 모두 제거.
+        규칙은 프롬프트와 directive로만 통제. 빈 응답일 때만 짧은 generic.
+        """
         prompt = self._build_ai_prompt(
             student_key, directive, user_utterance,
             user_mode=user_mode,
             silence_trigger=silence_trigger,
             user_silence_seconds=user_silence_seconds,
         )
-        # max_tokens=280: 한글 2문장(60~100자)에 충분 + verbose 응답 강제 차단
-        raw = self.api.call(prompt, max_tokens=280, temperature=0.9)
+        try:
+            raw = self.api.call(prompt, max_tokens=280, temperature=0.9)
+        except Exception as e:
+            print(f"       · [ai_utterance {student_key}] API 호출 실패: {e}")
+            raw = ""
         text = sanitize_ai_output(raw)
-        # 진단: 원시 응답 길이/내용 항상 로깅 (폴백 원인 추적)
         print(f"       · [ai_utterance {student_key}] raw len={len(raw or '')} "
-              f"sanitized len={len(text)} text={text[:80]!r}")
-
-        # 약수 나열 위반 시 1회 강제 재생성 (미완결 검사보다 먼저)
-        if _ai_lists_divisors(text):
-            print(f"       · [ai_utterance {student_key}] 약수 나열 위반 감지 — 강제 재생성")
-            divisor_block = (
-                "\n\n---\n[강제 재생성 — 약수 나열 위반]: 직전 응답이 'X의 약수는 Y, Z' 또는 "
-                "'X는 약수가 ~' 같은 형태로 약수 정보를 포함했다. 이는 s1-1 체크포인트 박탈 위반이다. "
-                "다시 작성하되 다음을 엄수:\n"
-                "- 발화에 **숫자 자체(예: 2, 4)는 등장 OK**, 그 숫자의 **약수가 무엇인지는 절대 발화 금지**.\n"
-                "- 약수는 사용자가 답할 부분이다. '약수가 뭐야?' / '약수 세어볼래?'처럼 질문으로만 던질 것.\n"
-                "- 한 문장 + 한 질문, 30자 이내로 짧게.\n"
-                "- 예: '2를 한 번 봐볼래? 약수가 뭐야?'\n"
-            )
-            try:
-                raw_dv = self.api.call(prompt + divisor_block, max_tokens=160,
-                                        temperature=1.0)
-                text_dv = sanitize_ai_output(raw_dv)
-                if text_dv and not _ai_lists_divisors(text_dv):
-                    text = text_dv
-                else:
-                    # 재생성도 위반 → 정규식으로 약수 나열 부분 제거
-                    text = _strip_divisor_listing(text)
-            except Exception as e:
-                print(f"       · [ai_utterance {student_key}] 약수 재생성 실패: {e}")
-                text = _strip_divisor_listing(text)
-
-        # 정의 단언 위반 시 강제 재생성 (s1-2/s1-3 보호)
-        if _ai_states_definition(text):
-            print(f"       · [ai_utterance {student_key}] 정의 단언 위반 감지 — 강제 재생성")
-            def_block = (
-                "\n\n---\n[강제 재생성 — 정의 단언 위반]: 직전 응답이 '소수는 약수가 N개', "
-                "'합성수는 ~', '약수가 N개면 소수/합성수' 같은 정의를 포함했다. s1-2/s1-3 박탈.\n"
-                "- 정의·구분 기준은 사용자가 입으로 도출해야 함. AI가 단언 절대 금지.\n"
-                "- 대신 '약수가 뭐야?' / '몇 개야?' / '어떻게 분류해?' 같은 질문으로만.\n"
-                "- 30자 이내 짧게.\n"
-            )
-            try:
-                raw_d = self.api.call(prompt + def_block, max_tokens=160, temperature=1.0)
-                text_d = sanitize_ai_output(raw_d)
-                if text_d and not _ai_states_definition(text_d) \
-                        and not _ai_lists_divisors(text_d):
-                    text = text_d
-                else:
-                    text = "음, 그럼 약수부터 같이 세어볼까?"
-            except Exception as e:
-                print(f"       · [ai_utterance {student_key}] 정의 재생성 실패: {e}")
-                text = "음, 그럼 약수부터 같이 세어볼까?"
-
-        # '1이 왜 둘 다 아닌지' 이유 묻기 위반 시 강제 재생성 (s1-3/s1-5 보호)
-        if _ai_asks_why_one_excluded(text):
-            print(f"       · [ai_utterance {student_key}] 1의 이유 묻기 위반 감지 — 강제 재생성")
-            why_block = (
-                "\n\n---\n[강제 재생성 — 1의 이유 묻기 위반]: 직전 응답이 '1은 왜 소수도 합성수도 "
-                "아닌 거야?' 같은 형태로 결론을 전제로 깔고 이유를 요구했다. s1-3/s1-5 체크포인트 박탈.\n"
-                "- '왜'라는 단어는 1과 함께 절대 사용 금지.\n"
-                "- 허용 형태는 단 두 가지: (a) '1의 약수는 뭐야?' 또는 (b) '1은 그럼 소수야 합성수야?'\n"
-                "- 사용자가 입으로 '둘 다 아니야'라고 답해야 hit이 잡힘. AI는 결론을 전제하지 말 것.\n"
-                "- 30자 이내로 짧게. 예: '1은 그럼 소수야 합성수야?'\n"
-            )
-            try:
-                raw_w = self.api.call(prompt + why_block, max_tokens=120,
-                                       temperature=1.0)
-                text_w = sanitize_ai_output(raw_w)
-                if text_w and not _ai_asks_why_one_excluded(text_w) \
-                        and not _ai_lists_divisors(text_w):
-                    text = text_w
-                else:
-                    # 재생성도 위반 → 안전한 binary 질문으로 강제 치환
-                    text = "1은 그럼 소수야 합성수야?"
-            except Exception as e:
-                print(f"       · [ai_utterance {student_key}] 이유 재생성 실패: {e}")
-                text = "1은 그럼 소수야 합성수야?"
-
-        # 미완결이면 최대 2회 재시도
-        if _is_incomplete_utterance(text):
-            print(f"       · [ai_utterance {student_key}] 미완결({len(text)}자, '{text[-10:] if text else ''}') — 1차 재시도")
-            retry_note_1 = (
-                "\n\n---\n[재생성]: 직전 응답이 중단됐다. 아래를 엄수:\n"
-                "- 따옴표로 수학 용어를 감싸지 말 것.\n"
-                "- 교과서 문장을 그대로 인용하지 말고 학생 말투로 풀어쓸 것.\n"
-                "- 문장 종결 어미(~야/어/지/까/래/해)로 끝맺을 것.\n"
-            )
-            text2 = ""
-            try:
-                raw2 = self.api.call(prompt + retry_note_1, max_tokens=280, temperature=1.0)
-                text2 = sanitize_ai_output(raw2)
-            except Exception as e:
-                print(f"       · [ai_utterance {student_key}] 1차 실패: {e}")
-
-            text3 = ""
-            if _is_incomplete_utterance(text2):
-                print(f"       · [ai_utterance {student_key}] 1차도 미완결 — 2차 재시도(용어 최소화)")
-                retry_note_2 = (
-                    "\n\n---\n[2차 재생성]: 수학 용어 최소화. 2문장 이내 짧게. "
-                    "학생 말투로 되묻는 질문 하나로 끝내기.\n"
-                )
-                try:
-                    raw3 = self.api.call(prompt + retry_note_2, max_tokens=300, temperature=1.2)
-                    text3 = sanitize_ai_output(raw3)
-                except Exception as e:
-                    print(f"       · [ai_utterance {student_key}] 2차 실패: {e}")
-
-            # 최선 선택
-            best = None
-            for cand in (text3, text2, text):
-                if cand and not _is_incomplete_utterance(cand):
-                    best = cand
-                    break
-            if best is None:
-                partial = text3 or text2 or text or ""
-                trimmed = _trim_to_last_complete_sentence(partial) if partial else ""
-                if trimmed and len(trimmed) >= 5:
-                    best = trimmed
-                elif partial and len(partial.strip()) >= 5:
-                    # 트림은 실패해도 partial이 5자 이상이면 그대로 사용
-                    best = partial.strip().rstrip("…").rstrip(".").rstrip()
-                    if best and best[-1] not in ".!?":
-                        best = best + "?"
-                else:
-                    # 정말 짧거나 빈 응답 — directive 기반 의미있는 fallback
-                    print(f"       · [ai_utterance {student_key}] 모든 재시도 실패 → "
-                          f"directive 기반 templated fallback 사용")
-                    best = self._directive_based_fallback(student_key, directive)
-            text = best
+              f"text={text[:80]!r}")
+        if not text or len(text.strip()) < 3:
+            persona_generic = {
+                "ai_1": "어디가 막혔어?",
+                "ai_2": "지금까지 얘기한 거 같이 정리해볼까?",
+                "ai_3": "어떻게 생각해?",
+            }
+            text = persona_generic.get(student_key, "어떻게 생각해?")
         return text
-
-    def _directive_based_fallback(self, student_key, directive):
-        """모든 재시도 실패 시 directive와 next_cp 정보로 의미있는 응답 생성.
-
-        generic 페르소나별 fallback("어디서 막혔어?")이 반복되는 폴백 지옥 방지.
-        next_uncovered_checkpoint의 knowledge를 활용해 그 체크포인트로 향하는
-        구체적 질문을 templated 형태로 생성.
-        """
-        directive = directive or {}
-        # 다음 미달성 체크포인트 식별
-        next_cp = self._next_missing_required()
-        cp_id = (next_cp or {}).get("id", "")
-        cp_know = (next_cp or {}).get("knowledge", "")
-        speech_goal = directive.get("speech_goal", "")
-
-        # 스테이지별 + cp별 안전한 templated 응답
-        # 어떤 경우에도 약수 나열·정의 단언·1의 이유 묻기 안 들어가야
-        if cp_id == "s1-1":
-            return "음, 그럼 약수가 뭔지 같이 살펴볼까?"
-        if cp_id == "s1-2":
-            return "그럼 소수의 약수가 어떤지 한번 같이 정리해볼까?"
-        if cp_id == "s1-3":
-            return "합성수는 약수가 어떨지 한번 생각해볼래?"
-        if cp_id == "s1-4":
-            return "그럼 어떤 수가 소수일지 예시를 같이 들어볼래?"
-        if cp_id == "s1-5":
-            return "1은 그럼 소수야 합성수야?"
-        if cp_id == "s1-6":
-            return "어떤 수부터 시작해서 보면 좋을까?"
-        if cp_id and cp_id.startswith("s2"):
-            return "20부터 30까지 한번 같이 분류해볼까?"
-        if cp_id and cp_id.startswith("s3"):
-            return "10보다 큰 합성수는 뭐가 있을지 같이 봐볼까?"
-        # 페르소나별 안전한 generic (next_cp 정보 없을 때만)
-        persona_fallback = {
-            "ai_1": "음, 어디서 막혔어? 한번 같이 볼까?",
-            "ai_2": "지금까지 얘기한 거 같이 정리해보면 어떨까?",
-            "ai_3": "어, 나는 잘 모르겠는데 어떻게 생각해?",
-        }
-        return persona_fallback.get(student_key, "음, 같이 한번 봐볼까?")
 
     def analyze_and_decide(self, user_utterance):
         stage = self.current_stage_info()
@@ -2078,144 +1926,16 @@ class CollaborativeSession:
                     buf.append(chunk)
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
-                # 진단: 스트림 raw 길이/내용 항상 로깅 (폴백 원인 추적)
                 print(f"       · [ai_stream {aid}] raw chunks={len(buf)} "
-                      f"sanitized len={len(full)} text={full[:80]!r}")
-                # 약수 나열 위반 시 강제 재생성 — incomplete 검사보다 우선
-                if _ai_lists_divisors(full):
-                    print(f"       · [ai_stream {aid}] 약수 나열 위반 감지 — 강제 재생성")
-                    q.put(("buffering", aid, full))
-                    divisor_block = (
-                        "\n\n---\n[강제 재생성 — 약수 나열 위반]: 직전 응답이 'X의 약수는 Y, Z' "
-                        "또는 'X는 약수가 ~' 형태로 약수 정보를 포함했다. s1-1 체크포인트 박탈.\n"
-                        "- 발화에 **숫자(예: 2, 4)는 등장 OK**, 그 숫자의 **약수가 무엇인지는 절대 발화 금지**.\n"
-                        "- 약수는 사용자가 답할 부분. '약수가 뭐야?' / '약수 세어볼래?' 형태로만.\n"
-                        "- 한 문장 + 한 질문, 30자 이내. 예: '2를 한 번 봐볼래? 약수가 뭐야?'\n"
-                    )
-                    try:
-                        raw_dv = self.api.call(prompt + divisor_block, max_tokens=160,
-                                                temperature=1.0)
-                        full_dv = sanitize_ai_output(raw_dv)
-                        if full_dv and not _ai_lists_divisors(full_dv):
-                            full = full_dv
-                        else:
-                            full = _strip_divisor_listing(full)
-                    except Exception as e:
-                        print(f"       · [ai_stream {aid}] 약수 재생성 실패: {e}")
-                        full = _strip_divisor_listing(full)
-
-                # 정의 단언 위반 시 강제 재생성 (s1-2/s1-3 보호)
-                if _ai_states_definition(full):
-                    print(f"       · [ai_stream {aid}] 정의 단언 위반 감지 — 강제 재생성")
-                    q.put(("buffering", aid, full))
-                    def_block = (
-                        "\n\n---\n[강제 재생성 — 정의 단언 위반]: '소수는 약수가 N개', "
-                        "'합성수는 ~', '약수가 N개면 소수' 같은 정의 포함. s1-2/s1-3 박탈.\n"
-                        "- 정의는 사용자가 입으로 도출. AI 단언 금지.\n"
-                        "- 대신 '약수가 뭐야?' / '어떻게 분류해?' 식 질문으로만. 30자 이내.\n"
-                    )
-                    try:
-                        raw_d = self.api.call(prompt + def_block, max_tokens=160, temperature=1.0)
-                        full_d = sanitize_ai_output(raw_d)
-                        if full_d and not _ai_states_definition(full_d) \
-                                and not _ai_lists_divisors(full_d):
-                            full = full_d
-                        else:
-                            full = "음, 그럼 약수부터 같이 세어볼까?"
-                    except Exception as e:
-                        print(f"       · [ai_stream {aid}] 정의 재생성 실패: {e}")
-                        full = "음, 그럼 약수부터 같이 세어볼까?"
-
-                # '1이 왜 둘 다 아닌지' 이유 묻기 위반 시 강제 재생성
-                if _ai_asks_why_one_excluded(full):
-                    print(f"       · [ai_stream {aid}] 1의 이유 묻기 위반 감지 — 강제 재생성")
-                    q.put(("buffering", aid, full))
-                    why_block = (
-                        "\n\n---\n[강제 재생성 — 1의 이유 묻기 위반]: '1은 왜 소수도 합성수도 "
-                        "아닌 거야?' 같이 결론 전제 + 이유 요구. s1-3/s1-5 박탈.\n"
-                        "- '왜'를 1과 함께 사용 금지. 허용 형태 두 가지: (a) '1의 약수는 뭐야?' "
-                        "또는 (b) '1은 그럼 소수야 합성수야?'\n"
-                        "- 사용자가 '둘 다 아니야'라고 직접 답해야 hit. 30자 이내.\n"
-                    )
-                    try:
-                        raw_w = self.api.call(prompt + why_block, max_tokens=120,
-                                               temperature=1.0)
-                        full_w = sanitize_ai_output(raw_w)
-                        if full_w and not _ai_asks_why_one_excluded(full_w) \
-                                and not _ai_lists_divisors(full_w):
-                            full = full_w
-                        else:
-                            full = "1은 그럼 소수야 합성수야?"
-                    except Exception as e:
-                        print(f"       · [ai_stream {aid}] 이유 재생성 실패: {e}")
-                        full = "1은 그럼 소수야 합성수야?"
-                # 스트림 종료 시점에 buffering 이벤트 — UI에서 커서 제거하고
-                # 재시도 동안 "..." 같은 표시로 상태 분명히 (사용자가 "잘림" 오해 방지)
-                if _is_incomplete_utterance(full):
-                    q.put(("buffering", aid, full))
-
-                # 스트림이 도중 잘린 경우(RECITATION 등) — 최대 2회 재시도.
-                # 1차: anti-quote/anti-교과서 지시. 2차: 완전 재구성 강제.
-                if _is_incomplete_utterance(full):
-                    print(f"       · [ai_stream {aid}] 미완결({len(full)}자, '{full[-10:] if full else ''}') — 1차 재시도")
-                    retry_note_1 = (
-                        "\n\n---\n[재생성]: 직전 응답이 중단됐다. 아래를 엄수:\n"
-                        "- 따옴표로 수학 용어를 감싸지 말 것.\n"
-                        "- 교과서 문장('약수가 2개인 수', '1과 자기 자신만' 등)을 그대로 인용하지 말고,\n"
-                        "  학생 말투로 풀어쓸 것. 예: '약수가 몇 개냐면 두 개야' → '나누면 1이랑 자기만 되는 수야'.\n"
-                        "- 문장 종결 어미(~야/어/지/까/래/해)로 끝맺을 것.\n"
-                    )
-                    full2 = ""
-                    try:
-                        raw2 = self.api.call(prompt + retry_note_1, max_tokens=280, temperature=1.0)
-                        full2 = sanitize_ai_output(raw2)
-                    except Exception as e:
-                        print(f"       · [ai_stream {aid}] 1차 재시도 실패: {e}")
-
-                    # 2차 재시도: 수학 용어 최소화 + 짧은 질문 중심
-                    full3 = ""
-                    if _is_incomplete_utterance(full2):
-                        print(f"       · [ai_stream {aid}] 1차도 미완결 — 2차 재시도(용어 최소화)")
-                        retry_note_2 = (
-                            "\n\n---\n[2차 재생성]: 앞 시도 모두 중단됐다.\n"
-                            "- 수학 용어 사용 최소화. 대신 학생 친구 말투로만.\n"
-                            "- 2문장 이내 짧게. 친구한테 되묻는 질문 하나로 끝내기.\n"
-                            "- 예: '음, 헷갈리는구나. 같이 천천히 볼까?' / '아 그렇게 생각했구나, 왜 그런 것 같아?'\n"
-                        )
-                        try:
-                            raw3 = self.api.call(prompt + retry_note_2, max_tokens=300, temperature=1.2)
-                            full3 = sanitize_ai_output(raw3)
-                        except Exception as e:
-                            print(f"       · [ai_stream {aid}] 2차 재시도 실패: {e}")
-
-                    # 최선 선택: 완결인 것 중 가장 최근 것 우선
-                    best = None
-                    for candidate in (full3, full2, full):
-                        if candidate and not _is_incomplete_utterance(candidate):
-                            best = candidate
-                            break
-
-                    if best is None:
-                        # 모두 불완결 — partial을 마지막 완결 문장까지 트림.
-                        # "..." 마커는 UX에 혼란이라 절대 부착하지 않음.
-                        partial = full3 or full2 or full or ""
-                        trimmed = _trim_to_last_complete_sentence(partial) if partial else ""
-                        # 최소 길이 5자 — "어디 막혔어?" 같은 짧은 정상 응답도 통과
-                        if trimmed and len(trimmed) >= 5:
-                            best = trimmed
-                        elif partial and len(partial.strip()) >= 5:
-                            # 트림은 실패했지만 partial이 5자 이상 있으면 그대로 사용
-                            # (말줄임표 등 부적절한 문자만 제거)
-                            best = partial.strip().rstrip("…").rstrip(".").rstrip()
-                            if best and best[-1] not in ".!?":
-                                best = best + "?"
-                        else:
-                            # 트림 결과 너무 짧거나 빈 응답 — directive 기반 fallback
-                            print(f"       · [ai_stream {aid}] 모든 재시도 실패 → "
-                                  f"directive 기반 templated fallback 사용")
-                            best = self._directive_based_fallback(aid, directive)
-                    full = best
-
+                      f"text={full[:80]!r}")
+                # v1.35: 필터/재시도 체인 제거. LLM 출력 그대로 사용.
+                if not full or len(full.strip()) < 3:
+                    persona_generic = {
+                        "ai_1": "어디가 막혔어?",
+                        "ai_2": "지금까지 얘기한 거 같이 정리해볼까?",
+                        "ai_3": "어떻게 생각해?",
+                    }
+                    full = persona_generic.get(aid, "어떻게 생각해?")
                 if not started:
                     q.put(("start", aid, ""))
                 q.put(("done", aid, full))
@@ -2342,32 +2062,6 @@ class CollaborativeSession:
         raw = self.api.call(prompt, max_tokens=600, temperature=0.8)
         print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...")
         text = sanitize_ai_output(raw)
-
-        # 정의 단언 위반 시 강제 재생성 (체크포인트 박탈 방지)
-        if _ai_states_definition(text):
-            print(f"       · [stage_intro] 정의 단언 위반 감지 — 강제 재생성")
-            def_block = (
-                "\n\n---\n[강제 재생성 — 정의 단언 위반]: 직전 응답에 '소수는 약수가 N개', "
-                "'합성수는 ~', '약수가 N개면 소수' 같은 정의가 포함됐다. intro에서 정의를 제시하면 "
-                "활동의 핵심 학습 기회가 사라진다.\n"
-                "- 정의·구분 기준·약수 개수 등 핵심 변별 단서를 절대 발화하지 말 것.\n"
-                "- 단어만 던지고 답은 사용자에게 맡길 것.\n"
-                "- 예: '자, 이번엔 소수랑 합성수가 뭔지 같이 얘기해 볼 차례야. 다들 어떻게 생각해?'\n"
-                "- 2~3문장, 열린 질문 하나로 마무리.\n"
-            )
-            try:
-                raw_d = self.api.call(prompt + def_block, max_tokens=400, temperature=1.0)
-                text_d = sanitize_ai_output(raw_d)
-                if text_d and not _ai_states_definition(text_d):
-                    text = text_d
-                    print(f"       · [stage_intro] 정의 위반 재생성 성공")
-                else:
-                    # 재생성 실패 — 하드코딩 fallback 사용
-                    print(f"       · [stage_intro] 정의 위반 재생성 실패 — fallback")
-                    text = ""  # 아래 fallback 트리거
-            except Exception as e:
-                print(f"       · [stage_intro] 정의 재생성 실패: {e}")
-                text = ""
 
         # 불완전(길이 짧음 or 문장 미종결)이면 재시도 (모듈 레벨 헬퍼 사용)
         _is_incomplete = _is_incomplete_utterance
