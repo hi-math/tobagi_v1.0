@@ -1205,6 +1205,33 @@ class CollaborativeSession:
             }
             self._enforce_rotation_guard(decision)
             self._cap_single_speaker(decision)  # 기본 1명 발화 강제
+
+            # fallback 경로에서도 키워드 기반 체크포인트 hit 적용 (LLM 응답 없을 때
+            # 적어도 코드 매칭이라도 작동해야 진척이 멈추지 않음).
+            try:
+                kw_hits = self._keyword_match_checkpoints(user_utterance, stage)
+                if kw_hits:
+                    from .learner_model import (
+                        apply_checkpoint_hits, propagate_checkpoints_to_ai,
+                    )
+                    apply_checkpoint_hits(
+                        self.learner_models["user"], kw_hits,
+                        stage=self.current_stage, turn=self.turn_count, source="user",
+                    )
+                    ai_levels = {
+                        aid: self.config["personas"]["ai_students"][aid].get("level", "중")
+                        for aid in self.AI_KEYS
+                        if aid in self.config["personas"]["ai_students"]
+                    }
+                    propagate_checkpoints_to_ai(
+                        self.learner_models, kw_hits,
+                        stage=self.current_stage, turn=self.turn_count,
+                        ai_levels=ai_levels,
+                    )
+                    print(f"       · [checkpoint fallback-keyword] hit={kw_hits}")
+            except Exception as e:
+                print(f"       · [checkpoint fallback-keyword] 실패: {e}")
+
             self._stage_complete_safety_net(decision, user_utterance)
             # fallback 경로에서도 2단계 게이트 적용 (조건 충족 시 바로 advance 방지)
             self._apply_stage_gate(decision, user_utterance)
@@ -1253,13 +1280,63 @@ class CollaborativeSession:
                         "evidence": "",
                     })
 
+        # --- 체크포인트 적용 (safety_net이 progress를 보기 전에 먼저 갱신) ---
+        # 이전 버그: safety_net 호출 시점에 user progress가 아직 갱신 안 돼서
+        #             stage_complete_required 판정이 항상 한 턴 늦게 적용됐음.
+        # 이번 수정: 체크포인트 hits를 가장 먼저 적용 → safety_net이 최신 progress 사용.
+        llm_hits_early = (
+            analysis.get("checkpoint_hits")
+            or merged.get("checkpoint_hits")
+            or []
+        )
+        if isinstance(llm_hits_early, str):
+            llm_hits_early = [llm_hits_early]
+        llm_hits_early = [str(h).strip() for h in llm_hits_early if h]
+        keyword_hits_early = self._keyword_match_checkpoints(user_utterance, stage)
+        seen_e = set(llm_hits_early)
+        merged_hits = list(llm_hits_early)
+        for cid in keyword_hits_early:
+            if cid not in seen_e:
+                seen_e.add(cid)
+                merged_hits.append(cid)
+        print(f"       · [checkpoint pre-safety_net] llm={llm_hits_early} keyword={keyword_hits_early} merged={merged_hits}")
+        if merged_hits:
+            try:
+                from .learner_model import (
+                    apply_checkpoint_hits, propagate_checkpoints_to_ai,
+                )
+                apply_checkpoint_hits(
+                    self.learner_models["user"], merged_hits,
+                    stage=self.current_stage, turn=self.turn_count, source="user",
+                )
+                ai_levels_e = {
+                    aid: self.config["personas"]["ai_students"][aid].get("level", "중")
+                    for aid in self.AI_KEYS
+                    if aid in self.config["personas"]["ai_students"]
+                }
+                self._recent_ai_checkpoint_gains = propagate_checkpoints_to_ai(
+                    self.learner_models, merged_hits,
+                    stage=self.current_stage, turn=self.turn_count,
+                    ai_levels=ai_levels_e,
+                )
+                # 진척도 스냅샷
+                user_prog = (
+                    self.learner_models["user"].get("checkpoint_progress", {})
+                    .get(str(self.current_stage), {})
+                )
+                hit_now = sorted(cid for cid, v in user_prog.items()
+                                 if isinstance(v, dict) and v.get("hit"))
+                print(f"       · [checkpoint stage{self.current_stage} progress] hit={hit_now}")
+            except Exception as e:
+                print(f"       · [checkpoint] 적용 실패: {e}")
+
         if "speaking_agents" not in decision or decision["speaking_agents"] is None:
             decision["speaking_agents"] = [
                 aid for aid in self.AI_KEYS if decision.get(f"{aid}_directive")
             ]
         self._enforce_rotation_guard(decision)
         self._cap_single_speaker(decision)  # 기본 1명 발화 강제 (rotation 후 단계)
-        # stage_complete 안전망: LLM이 false여도 명시적 완료 기준을 충족하면 true로 교정
+        # stage_complete 안전망: 위에서 progress 갱신 후 호출되므로 최신 상태 반영
         self._stage_complete_safety_net(decision, user_utterance)
 
         # --- Stage 완료 2단계 게이트 (승인 확인) ---
@@ -1307,71 +1384,8 @@ class CollaborativeSession:
             except Exception as e:
                 print(f"       · [se] 신호 반영 실패: {e}")
 
-        # --- 체크포인트 적용 + AI 전파 ---
-        # 방어적 파싱: LLM이 analysis 안이 아닌 top-level에 올리는 경우도 있음
-        llm_hits = (
-            analysis.get("checkpoint_hits")
-            or merged.get("checkpoint_hits")
-            or []
-        )
-        # 문자열 단일 반환 대응 (예: "s1-1")
-        if isinstance(llm_hits, str):
-            llm_hits = [llm_hits]
-        # id 정규화 (공백 제거)
-        llm_hits = [str(h).strip() for h in llm_hits if h]
-
-        # 코드 측 키워드 매칭으로 LLM 누락 보강
-        keyword_hits = self._keyword_match_checkpoints(user_utterance, stage)
-
-        # 합집합 (순서: LLM 우선 + keyword 추가분)
-        seen = set(llm_hits)
-        checkpoint_hits = list(llm_hits)
-        for cid in keyword_hits:
-            if cid not in seen:
-                seen.add(cid)
-                checkpoint_hits.append(cid)
-
-        print(f"       · [checkpoint raw] llm={llm_hits} keyword={keyword_hits} merged={checkpoint_hits}")
-        if checkpoint_hits:
-            try:
-                from .learner_model import (
-                    apply_checkpoint_hits, propagate_checkpoints_to_ai,
-                )
-                new_user = apply_checkpoint_hits(
-                    self.learner_models["user"], checkpoint_hits,
-                    stage=self.current_stage, turn=self.turn_count, source="user",
-                )
-                if new_user:
-                    print(f"       · [checkpoint] user +{new_user}: {checkpoint_hits}")
-                else:
-                    print(f"       · [checkpoint] user 변동 없음 (hits={checkpoint_hits} 모두 이미 등록)")
-                # 진척도 스냅샷
-                user_prog_snapshot = (
-                    self.learner_models["user"].get("checkpoint_progress", {})
-                    .get(str(self.current_stage), {})
-                )
-                hit_ids_now = sorted(cid for cid, v in user_prog_snapshot.items()
-                                     if isinstance(v, dict) and v.get("hit"))
-                print(f"       · [checkpoint stage{self.current_stage} progress] hit={hit_ids_now}")
-
-                ai_levels = {
-                    aid: self.config["personas"]["ai_students"][aid].get("level", "중")
-                    for aid in self.AI_KEYS
-                    if aid in self.config["personas"]["ai_students"]
-                }
-                newly_learned = propagate_checkpoints_to_ai(
-                    self.learner_models, checkpoint_hits,
-                    stage=self.current_stage, turn=self.turn_count,
-                    ai_levels=ai_levels,
-                )
-                # 방금 학습한 AI가 있으면 전역 기록 + 로그 (다음 발화에서 활용)
-                self._recent_ai_checkpoint_gains = newly_learned
-                for aid, cps in newly_learned.items():
-                    if cps:
-                        name = self.config["personas"]["ai_students"][aid].get("name", aid)
-                        print(f"       · [checkpoint→AI] {name}({ai_levels.get(aid)}) 학습: {cps}")
-            except Exception as e:
-                print(f"       · [checkpoint] 반영 실패: {e}")
+        # 체크포인트 적용은 위에서 이미 처리됨 (safety_net 이전).
+        # _recent_ai_checkpoint_gains 가 채워졌으면 AI 발화 프롬프트에서 활용됨.
 
         self.last_tutor_decision = decision
         return {"analysis": analysis, "decision": decision}
