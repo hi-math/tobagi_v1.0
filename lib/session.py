@@ -1509,13 +1509,22 @@ class CollaborativeSession:
             user_silence_seconds=user_silence_seconds,
         )
         try:
-            raw = self.api.call(prompt, max_tokens=280, temperature=0.9)
+            raw = self.api.call(prompt, max_tokens=400, temperature=0.7)
         except Exception as e:
             print(f"       · [ai_utterance {student_key}] API 호출 실패: {e}")
             raw = ""
         text = sanitize_ai_output(raw)
         print(f"       · [ai_utterance {student_key}] raw len={len(raw or '')} "
               f"text={text[:80]!r}")
+        if not text or len(text.strip()) < 3:
+            print(f"       · [ai_utterance {student_key}] 빈 응답 — temperature 1.0 재시도")
+            try:
+                raw = self.api.call(prompt, max_tokens=400, temperature=1.0)
+                text = sanitize_ai_output(raw)
+                print(f"       · [ai_utterance {student_key}] 재시도 raw len="
+                      f"{len(raw or '')} text={text[:80]!r}")
+            except Exception as e:
+                print(f"       · [ai_utterance {student_key}] 재시도 실패: {e}")
         if not text or len(text.strip()) < 3:
             persona_generic = {
                 "ai_1": "어디가 막혔어?",
@@ -1928,7 +1937,18 @@ class CollaborativeSession:
                 full = sanitize_ai_output("".join(buf))
                 print(f"       · [ai_stream {aid}] raw chunks={len(buf)} "
                       f"text={full[:80]!r}")
-                # v1.35: 필터/재시도 체인 제거. LLM 출력 그대로 사용.
+                # v1.36: 스트리밍 빈 응답 시 non-streaming으로 한 번 재시도
+                if not full or len(full.strip()) < 3:
+                    print(f"       · [ai_stream {aid}] 빈 스트림 — non-streaming 재시도")
+                    try:
+                        raw_ns = self.api.call(prompt, max_tokens=400,
+                                                temperature=0.7, stream=False)
+                        full = sanitize_ai_output(raw_ns)
+                        print(f"       · [ai_stream {aid}] non-stream raw len="
+                              f"{len(raw_ns or '')} text={full[:80]!r}")
+                    except Exception as e:
+                        print(f"       · [ai_stream {aid}] non-stream 재시도 실패: {e}")
+                # 그래도 빈 응답이면 짧은 generic
                 if not full or len(full.strip()) < 3:
                     persona_generic = {
                         "ai_1": "어디가 막혔어?",
