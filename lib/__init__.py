@@ -12,13 +12,16 @@
 노트북에서의 일반적인 사용 패턴:
 
     from team4 import bootstrap, launch_ui
-    # Gemini (무료 티어, 기본 권장)
+    # OpenAI (기본 권장 — RECITATION 필터 없음)
     ctx = bootstrap(base_path="team4",
-                    api_key=userdata.get("GEMINI_API_KEY"),
-                    provider="gemini")
+                    api_key=userdata.get("OPENAI_API_KEY"),
+                    provider="openai",
+                    model="gpt-4o-mini")
 
-    # 기존 Claude를 쓰려면:
-    # ctx = bootstrap(..., provider="anthropic")
+    # Gemini를 쓰려면:
+    # ctx = bootstrap(..., provider="gemini",  api_key=userdata.get("GEMINI_API_KEY"))
+    # Claude를 쓰려면:
+    # ctx = bootstrap(..., provider="anthropic", api_key=userdata.get("CLAUDE_API_KEY"))
 
     launch_ui(**ctx, share=True)
 """
@@ -27,7 +30,7 @@
 # 버전 — 매 커밋마다 +0.01 수동 증가 (단일 source of truth)
 # 이 값이 Gradio UI 상단에 자동 표시된다.
 # ============================================================
-__version__ = "v1.21"
+__version__ = "v1.24"
 
 from .config_loader import load_config, load_json, load_md
 from .learner_model import create_learner_model_instance, init_learners

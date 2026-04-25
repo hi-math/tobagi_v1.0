@@ -277,6 +277,17 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     if cur_len - last_yield_len.get(aid, 0) >= THROTTLE_CHARS or "\n" in payload:
                         last_yield_len[aid] = cur_len
                         yield _chat_only(history, clear_msg=False)
+                elif ev == "buffering":
+                    # 스트림 종료 + 재시도 진행 중. 커서 빼고 "💭 다시 생각 중..." 부착.
+                    history[slot[aid]] = {
+                        "role": "assistant",
+                        "content": _bubble(
+                            aid, AI_NAME_BY_ID[aid],
+                            (buf.get(aid, "") or payload).rstrip()
+                            + "\n\n_💭 다시 생각 중..._",
+                        ),
+                    }
+                    yield _chat_only(history, clear_msg=False)
                 elif ev == "done":
                     done_payloads[aid] = payload
                     history[slot[aid]] = {

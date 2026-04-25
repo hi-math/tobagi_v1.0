@@ -1054,8 +1054,8 @@ class CollaborativeSession:
             silence_trigger=silence_trigger,
             user_silence_seconds=user_silence_seconds,
         )
-        # max_tokens=480: 한글 2~4문장이 잘리지 않게 여유 있게 설정
-        raw = self.api.call(prompt, max_tokens=480, temperature=0.9)
+        # max_tokens=280: 한글 2문장(60~100자)에 충분 + verbose 응답 강제 차단
+        raw = self.api.call(prompt, max_tokens=280, temperature=0.9)
         text = sanitize_ai_output(raw)
 
         # 미완결이면 최대 2회 재시도
@@ -1069,7 +1069,7 @@ class CollaborativeSession:
             )
             text2 = ""
             try:
-                raw2 = self.api.call(prompt + retry_note_1, max_tokens=480, temperature=1.0)
+                raw2 = self.api.call(prompt + retry_note_1, max_tokens=280, temperature=1.0)
                 text2 = sanitize_ai_output(raw2)
             except Exception as e:
                 print(f"       · [ai_utterance {student_key}] 1차 실패: {e}")
@@ -1488,7 +1488,7 @@ class CollaborativeSession:
             try:
                 # max_tokens=480: 한글 2~4문장이 중간에서 잘리지 않도록 여유 부여
                 stream = self.api.call(
-                    prompt, max_tokens=480, temperature=0.9, stream=True,
+                    prompt, max_tokens=280, temperature=0.9, stream=True,
                 )
                 for chunk in stream:
                     if not chunk:
@@ -1499,6 +1499,10 @@ class CollaborativeSession:
                     buf.append(chunk)
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
+                # 스트림 종료 시점에 buffering 이벤트 — UI에서 커서 제거하고
+                # 재시도 동안 "..." 같은 표시로 상태 분명히 (사용자가 "잘림" 오해 방지)
+                if _is_incomplete_utterance(full):
+                    q.put(("buffering", aid, full))
 
                 # 스트림이 도중 잘린 경우(RECITATION 등) — 최대 2회 재시도.
                 # 1차: anti-quote/anti-교과서 지시. 2차: 완전 재구성 강제.
@@ -1513,7 +1517,7 @@ class CollaborativeSession:
                     )
                     full2 = ""
                     try:
-                        raw2 = self.api.call(prompt + retry_note_1, max_tokens=480, temperature=1.0)
+                        raw2 = self.api.call(prompt + retry_note_1, max_tokens=280, temperature=1.0)
                         full2 = sanitize_ai_output(raw2)
                     except Exception as e:
                         print(f"       · [ai_stream {aid}] 1차 재시도 실패: {e}")
