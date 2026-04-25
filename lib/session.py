@@ -9,8 +9,16 @@
 - 사용자 교수자 모드: 사용자가 설명자 모드가 되면 AI는 학습자 모드로 전환해 짧게 반응
 """
 
+import functools as _ft
 import re
 import time
+import sys as _sys
+# v1.37: Colab thread stdout buffering 회피 — 모든 print를 자동 flush
+_orig_print = print
+def print(*args, **kwargs):
+    kwargs.setdefault('flush', True)
+    _orig_print(*args, **kwargs)
+
 import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -638,7 +646,7 @@ class CollaborativeSession:
             if aid not in deduped:
                 decision[f"{aid}_directive"] = None
         if deduped != speakers_in:
-            print(f"       · [rotation-guard] 교정: {speakers_in} → {deduped}")
+            print(f"       · [rotation-guard] 교정: {speakers_in} → {deduped}", flush=True)
 
     def _cap_single_speaker(self, decision):
         """한 턴 기본 1명 발화로 강제. 두 명이 유사한 호응을 반복하는 문제 방지.
@@ -689,7 +697,7 @@ class CollaborativeSession:
                     decision[f"{dropped_aid}_directive"] = None
                     speakers = [a for a in speakers if a != dropped_aid]
                     decision["speaking_agents"] = speakers
-                    print(f"       · [single-speaker-cap] comp 반복 방지 — 서연 최근 2턴 내 이미 발화 → 제외")
+                    print(f"       · [single-speaker-cap] comp 반복 방지 — 서연 최근 2턴 내 이미 발화 → 제외", flush=True)
                     return
             return
 
@@ -747,7 +755,7 @@ class CollaborativeSession:
             hit_ids = [cid for cid in required
                        if user_prog.get(cid, {}).get("hit")]
             missing = [cid for cid in required if cid not in hit_ids]
-            print(f"       · [stage-guard] required={required} hit={hit_ids} missing={missing}")
+            print(f"       · [stage-guard] required={required} hit={hit_ids} missing={missing}", flush=True)
             if not missing:
                 hit_reason = f"stage_complete_required 전부 hit ({required})"
 
@@ -768,7 +776,7 @@ class CollaborativeSession:
                 "1은 소수도 합성수도 아니", "1은 둘 다 아니",
                 "1은 소수 아니", "1은 합성수 아니", "1은 예외",
             ])
-            print(f"       · [stage-guard s1 키워드] s1-2={s12} s1-3={s13} s1-5={s15}")
+            print(f"       · [stage-guard s1 키워드] s1-2={s12} s1-3={s13} s1-5={s15}", flush=True)
 
         elif not hit_reason and stage_num == 2:
             has_23 = "23" in combined
@@ -777,17 +785,17 @@ class CollaborativeSession:
                 "나머지는 합성수", "나머지가 합성수", "다른 건 합성수",
                 "다른건 합성수", "다른 수는 합성수", "이외는 합성수",
             ])
-            print(f"       · [stage-guard s2 키워드] 23={has_23} 29={has_29} 나머지={others_covered}")
+            print(f"       · [stage-guard s2 키워드] 23={has_23} 29={has_29} 나머지={others_covered}", flush=True)
 
         elif not hit_reason and stage_num == 3:
             has_12 = "12" in combined
             has_13 = "13" in combined
             has_25 = "25" in combined
-            print(f"       · [stage-guard s3 키워드] 12={has_12} 13={has_13} 25={has_25}")
+            print(f"       · [stage-guard s3 키워드] 12={has_12} 13={has_13} 25={has_25}", flush=True)
 
         if hit_reason:
             decision["stage_complete"] = True
-            print(f"       · [stage-guard] 완료 기준 충족 → stage_complete=true (reason: {hit_reason})")
+            print(f"       · [stage-guard] 완료 기준 충족 → stage_complete=true (reason: {hit_reason})", flush=True)
 
     def _apply_user_addressed_override(self, decision, user_utterance):
         """사용자가 특정 AI를 명시적으로 지목했다면 그 AI 단독 발화로 강제.
@@ -807,7 +815,7 @@ class CollaborativeSession:
             # 이미 해당 AI만 선정됨 — 별도 작업 없음
             return
 
-        print(f"       · [user-addressed] 사용자가 {addressed_name}({addressed}) 지목 → 단독 발화 강제 (기존: {current})")
+        print(f"       · [user-addressed] 사용자가 {addressed_name}({addressed}) 지목 → 단독 발화 강제 (기존: {current})", flush=True)
 
         # 지목된 AI의 directive가 없으면 기본 응답 directive 생성
         if not decision.get(f"{addressed}_directive"):
@@ -839,25 +847,25 @@ class CollaborativeSession:
         consent = _detect_stage_advance_consent(user_utterance)
         if self.pending_stage_complete:
             if consent == "consent":
-                print(f"       · [stage-gate] 사용자 승인 감지 → stage_complete=True 확정")
+                print(f"       · [stage-gate] 사용자 승인 감지 → stage_complete=True 확정", flush=True)
                 decision["stage_complete"] = True
                 self.pending_stage_complete = False
                 self.pending_stage_complete_since_turn = None
             elif consent == "reject":
-                print(f"       · [stage-gate] 사용자 거부 감지 → pending 해제, Stage 유지")
+                print(f"       · [stage-gate] 사용자 거부 감지 → pending 해제, Stage 유지", flush=True)
                 decision["stage_complete"] = False
                 self.pending_stage_complete = False
                 self.pending_stage_complete_since_turn = None
             else:
                 held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
                 if held_turns >= 2:
-                    print(f"       · [stage-gate] pending 2턴 경과 → 해제, Stage 유지")
+                    print(f"       · [stage-gate] pending 2턴 경과 → 해제, Stage 유지", flush=True)
                     self.pending_stage_complete = False
                     self.pending_stage_complete_since_turn = None
                 decision["stage_complete"] = False  # pending 중엔 advance 막음
         elif decision.get("stage_complete"):
             # 최초로 완료 조건 충족 감지 → 승인 질문 모드로 전환
-            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 — 서연 확인 질문 삽입")
+            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 — 서연 확인 질문 삽입", flush=True)
             self.pending_stage_complete = True
             self.pending_stage_complete_since_turn = self.turn_count
             decision["stage_complete"] = False  # 바로 advance 막기
@@ -1007,10 +1015,10 @@ class CollaborativeSession:
 
         hits = []
         if len(primes_with_2) >= 2:
-            print(f"       · [generalization] 소수 2+ 예시 누적 → s1-2 hit (예시: {sorted(primes_with_2)})")
+            print(f"       · [generalization] 소수 2+ 예시 누적 → s1-2 hit (예시: {sorted(primes_with_2)})", flush=True)
             hits.append("s1-2")
         if len(composites_with_3plus) >= 2:
-            print(f"       · [generalization] 합성수 2+ 예시 누적 → s1-3 hit (예시: {sorted(composites_with_3plus)})")
+            print(f"       · [generalization] 합성수 2+ 예시 누적 → s1-3 hit (예시: {sorted(composites_with_3plus)})", flush=True)
             hits.append("s1-3")
         return hits
 
@@ -1228,7 +1236,7 @@ class CollaborativeSession:
                                 model=fast_model)
             result = extract_json(raw)
         except Exception as e:
-            print(f"  ⚠️ 학습자 분석 실패: {e}")
+            print(f"  ⚠️ 학습자 분석 실패: {e}", flush=True)
             return {
                 "updates": [],
                 "misconception_changes": {"added": [], "removed": []},
@@ -1321,7 +1329,7 @@ class CollaborativeSession:
             raw = self.api.call(prompt, max_tokens=500, temperature=0.5, model=fast_model)
             decision = extract_json(raw)
         except Exception as e:
-            print(f"  ⚠️ 교수자 의사결정 실패: {e}")
+            print(f"  ⚠️ 교수자 의사결정 실패: {e}", flush=True)
             if silence_trigger:
                 aid = self._pick_silence_agent()
                 directive = {
@@ -1511,20 +1519,20 @@ class CollaborativeSession:
         try:
             raw = self.api.call(prompt, max_tokens=400, temperature=0.7)
         except Exception as e:
-            print(f"       · [ai_utterance {student_key}] API 호출 실패: {e}")
+            print(f"       · [ai_utterance {student_key}] API 호출 실패: {e}", flush=True)
             raw = ""
         text = sanitize_ai_output(raw)
         print(f"       · [ai_utterance {student_key}] raw len={len(raw or '')} "
               f"text={text[:80]!r}")
         if not text or len(text.strip()) < 3:
-            print(f"       · [ai_utterance {student_key}] 빈 응답 — temperature 1.0 재시도")
+            print(f"       · [ai_utterance {student_key}] 빈 응답 — temperature 1.0 재시도", flush=True)
             try:
                 raw = self.api.call(prompt, max_tokens=400, temperature=1.0)
                 text = sanitize_ai_output(raw)
                 print(f"       · [ai_utterance {student_key}] 재시도 raw len="
                       f"{len(raw or '')} text={text[:80]!r}")
             except Exception as e:
-                print(f"       · [ai_utterance {student_key}] 재시도 실패: {e}")
+                print(f"       · [ai_utterance {student_key}] 재시도 실패: {e}", flush=True)
         if not text or len(text.strip()) < 3:
             persona_generic = {
                 "ai_1": "어디가 막혔어?",
@@ -1586,15 +1594,15 @@ class CollaborativeSession:
                 fut = pool.submit(_invoke)
                 raw = fut.result(timeout=30)
             dt = time.time() - t0
-            print(f"       · analyze_and_decide 응답 {dt:.1f}s (model={fast_model or self.api.model}) len={len(raw)}")
+            print(f"       · analyze_and_decide 응답 {dt:.1f}s (model={fast_model or self.api.model}) len={len(raw)}", flush=True)
             merged = extract_json(raw)
             # 진단: LLM이 반환한 키 구조 로그
             _a = merged.get("analysis") or {}
             _d = merged.get("decision") or {}
-            print(f"       · [analyze keys] top={sorted(merged.keys())} analysis={sorted(_a.keys())}")
+            print(f"       · [analyze keys] top={sorted(merged.keys())} analysis={sorted(_a.keys())}", flush=True)
         except Exception as e:
             dt = time.time() - t0
-            print(f"  ⚠️ 통합 분석/결정 실패({dt:.1f}s): {e} — 기본 결정으로 대체 (fallback 호출 생략)")
+            print(f"  ⚠️ 통합 분석/결정 실패({dt:.1f}s): {e} — 기본 결정으로 대체 (fallback 호출 생략)", flush=True)
             # fallback 경로는 API 2회 더 호출 → 레이턴시 지옥. 그 대신 최소 결정을 즉석 구성해
             # UI가 100초 내에 반드시 움직이게 한다.
             analysis = {
@@ -1652,9 +1660,9 @@ class CollaborativeSession:
                         stage=self.current_stage, turn=self.turn_count,
                         ai_levels=ai_levels,
                     )
-                    print(f"       · [checkpoint fallback-keyword] hit={kw_hits}")
+                    print(f"       · [checkpoint fallback-keyword] hit={kw_hits}", flush=True)
             except Exception as e:
-                print(f"       · [checkpoint fallback-keyword] 실패: {e}")
+                print(f"       · [checkpoint fallback-keyword] 실패: {e}", flush=True)
 
             self._stage_complete_safety_net(decision, user_utterance)
             # 사용자 반복 답변 감지 → directive 강제 pivot (stage_gate 이전)
@@ -1731,7 +1739,7 @@ class CollaborativeSession:
             if cid not in seen_e:
                 seen_e.add(cid)
                 merged_hits.append(cid)
-        print(f"       · [checkpoint pre-safety_net] llm={llm_hits_early} keyword={keyword_hits_early} gen={gen_hits_early} merged={merged_hits}")
+        print(f"       · [checkpoint pre-safety_net] llm={llm_hits_early} keyword={keyword_hits_early} gen={gen_hits_early} merged={merged_hits}", flush=True)
         if merged_hits:
             try:
                 from .learner_model import (
@@ -1758,9 +1766,9 @@ class CollaborativeSession:
                 )
                 hit_now = sorted(cid for cid, v in user_prog.items()
                                  if isinstance(v, dict) and v.get("hit"))
-                print(f"       · [checkpoint stage{self.current_stage} progress] hit={hit_now}")
+                print(f"       · [checkpoint stage{self.current_stage} progress] hit={hit_now}", flush=True)
             except Exception as e:
-                print(f"       · [checkpoint] 적용 실패: {e}")
+                print(f"       · [checkpoint] 적용 실패: {e}", flush=True)
 
         if "speaking_agents" not in decision or decision["speaking_agents"] is None:
             decision["speaking_agents"] = [
@@ -1795,9 +1803,9 @@ class CollaborativeSession:
                     turn=self.turn_count,
                 )
                 if gained:
-                    print(f"       · [cps] +{gained} 태그 반영 ({[t.get('dimension') for t in cps_tags_raw]})")
+                    print(f"       · [cps] +{gained} 태그 반영 ({[t.get('dimension') for t in cps_tags_raw]})", flush=True)
             except Exception as e:
-                print(f"       · [cps] 태그 반영 실패: {e}")
+                print(f"       · [cps] 태그 반영 실패: {e}", flush=True)
 
         # --- self-efficacy 신호 반영 (발화 tone 기반 ±1) ---
         se_signals = (
@@ -1816,9 +1824,9 @@ class CollaborativeSession:
                 )
                 if applied:
                     deltas = [f"{s.get('item_id')}{'+' if s.get('delta',0)>0 else ''}{s.get('delta')}" for s in se_signals]
-                    print(f"       · [se] {applied}건 반영 ({deltas})")
+                    print(f"       · [se] {applied}건 반영 ({deltas})", flush=True)
             except Exception as e:
-                print(f"       · [se] 신호 반영 실패: {e}")
+                print(f"       · [se] 신호 반영 실패: {e}", flush=True)
 
         # 체크포인트 적용은 위에서 이미 처리됨 (safety_net 이전).
         # _recent_ai_checkpoint_gains 가 채워졌으면 AI 발화 프롬프트에서 활용됨.
@@ -1827,6 +1835,7 @@ class CollaborativeSession:
         return {"analysis": analysis, "decision": decision}
 
     def user_turn_prep(self, user_utterance):
+        print(f"[user_turn_prep] v1.37 시작 — utt={user_utterance[:40]!r}")
         silence_before = self.seconds_since_user_spoke()
         self.last_user_utterance_ts = time.time()
         self.current_user_mode = detect_user_mode(user_utterance)
@@ -1840,15 +1849,15 @@ class CollaborativeSession:
         self.turn_count += 1
         self.stage_turn_count += 1
 
-        print(f"  [mode] user_mode={self.current_user_mode} · 직전 침묵={silence_before:.0f}s")
-        print("  [1/2] 🔍🎓 통합 분석/결정 중 (1회 왕복)...")
+        print(f"  [mode] user_mode={self.current_user_mode} · 직전 침묵={silence_before:.0f}s", flush=True)
+        print("  [1/2] 🔍🎓 통합 분석/결정 중 (1회 왕복)...", flush=True)
         combined = self.analyze_and_decide(user_utterance)
         analysis = combined["analysis"]
         decision = combined["decision"]
         if analysis.get("observation_summary"):
-            print(f"       · 관찰: {analysis['observation_summary']}")
-        print(f"       · 전략: {decision.get('strategy', '')}")
-        print(f"       · speaking_agents: {decision.get('speaking_agents', [])}")
+            print(f"       · 관찰: {analysis['observation_summary']}", flush=True)
+        print(f"       · 전략: {decision.get('strategy', '')}", flush=True)
+        print(f"       · speaking_agents: {decision.get('speaking_agents', [])}", flush=True)
 
         return {
             "analysis": analysis,
@@ -1868,7 +1877,7 @@ class CollaborativeSession:
         if not targets:
             return
 
-        print(f"  [3/3] 💬 {len(targets)}명 병렬 발화 생성 (완료순 스트리밍)...")
+        print(f"  [3/3] 💬 {len(targets)}명 병렬 발화 생성 (완료순 스트리밍)...", flush=True)
 
         def _call(aid):
             directive = decision.get(f"{aid}_directive")
@@ -1907,7 +1916,7 @@ class CollaborativeSession:
         if not targets:
             return
 
-        print(f"  [3/3] 💬 {len(targets)}명 병렬 토큰 스트리밍...")
+        print(f"  [3/3] 💬 {len(targets)}명 병렬 토큰 스트리밍...", flush=True)
 
         q = queue.Queue()
 
@@ -1939,7 +1948,7 @@ class CollaborativeSession:
                       f"text={full[:80]!r}")
                 # v1.36: 스트리밍 빈 응답 시 non-streaming으로 한 번 재시도
                 if not full or len(full.strip()) < 3:
-                    print(f"       · [ai_stream {aid}] 빈 스트림 — non-streaming 재시도")
+                    print(f"       · [ai_stream {aid}] 빈 스트림 — non-streaming 재시도", flush=True)
                     try:
                         raw_ns = self.api.call(prompt, max_tokens=400,
                                                 temperature=0.7, stream=False)
@@ -1947,7 +1956,7 @@ class CollaborativeSession:
                         print(f"       · [ai_stream {aid}] non-stream raw len="
                               f"{len(raw_ns or '')} text={full[:80]!r}")
                     except Exception as e:
-                        print(f"       · [ai_stream {aid}] non-stream 재시도 실패: {e}")
+                        print(f"       · [ai_stream {aid}] non-stream 재시도 실패: {e}", flush=True)
                 # 그래도 빈 응답이면 짧은 generic
                 if not full or len(full.strip()) < 3:
                     persona_generic = {
@@ -2013,7 +2022,7 @@ class CollaborativeSession:
         if silence < min_seconds:
             return None
 
-        print(f"  [silence] 사용자 침묵 {silence:.0f}s 감지 → AI 선제 발화")
+        print(f"  [silence] 사용자 침묵 {silence:.0f}s 감지 → AI 선제 발화", flush=True)
         decision = self.tutor_decision(user_silence_seconds=silence,
                                        user_mode=self.current_user_mode)
 
@@ -2080,14 +2089,14 @@ class CollaborativeSession:
         })
         # stage_intro: max_tokens 넉넉하게 + 진단 로그로 truncation 원인 추적
         raw = self.api.call(prompt, max_tokens=600, temperature=0.8)
-        print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...")
+        print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...", flush=True)
         text = sanitize_ai_output(raw)
 
         # 불완전(길이 짧음 or 문장 미종결)이면 재시도 (모듈 레벨 헬퍼 사용)
         _is_incomplete = _is_incomplete_utterance
         attempt = 1
         while _is_incomplete(text) and attempt <= 2:
-            print(f"       · [stage_intro] 불완전({len(text)}자, '{text[-10:] if text else ''}') — 재시도 #{attempt}")
+            print(f"       · [stage_intro] 불완전({len(text)}자, '{text[-10:] if text else ''}') — 재시도 #{attempt}", flush=True)
             retry_prompt = render_prompt(self.prompts["stage_intro"], {
                 "opener_name": persona["name"],
                 # 첫 재시도: 제목 교체. 두 번째: 제목 더 일반화
@@ -2099,7 +2108,7 @@ class CollaborativeSession:
             })
             # 재시도마다 temperature 살짝 올려 다른 출력 유도
             raw = self.api.call(retry_prompt, max_tokens=600, temperature=0.9 + 0.05 * attempt)
-            print(f"       · [stage_intro retry#{attempt} len={len(raw)}] {raw[:120]!r}...")
+            print(f"       · [stage_intro retry#{attempt} len={len(raw)}] {raw[:120]!r}...", flush=True)
             text = sanitize_ai_output(raw)
             attempt += 1
 
@@ -2113,9 +2122,9 @@ class CollaborativeSession:
             }
             text = fallback_by_stage.get(stage_num,
                 "자, 이번에는 새로운 걸 같이 얘기해볼까? 다들 어떻게 생각해?")
-            print(f"       · [stage_intro] 하드코딩 fallback 적용 (stage {stage_num})")
+            print(f"       · [stage_intro] 하드코딩 fallback 적용 (stage {stage_num})", flush=True)
 
-        print(f"       · [stage_intro final len={len(text)}] {text[:120]!r}...")
+        print(f"       · [stage_intro final len={len(text)}] {text[:120]!r}...", flush=True)
         self.conversation.append({
             "speaker": persona["name"],
             "content": text,
