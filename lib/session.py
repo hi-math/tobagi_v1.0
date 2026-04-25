@@ -229,6 +229,67 @@ def _strip_divisor_listing(text: str) -> str:
     return "음, 약수가 뭐가 있는지 같이 세어볼래?"
 
 
+_PARTICLE_CHARS = "은는이가을를과와에서도만뿐"  # 빈도 높은 조사 모음
+_HANGUL_RE = re.compile(r"[가-힣]")
+
+
+def _hint_to_fuzzy_regex(hint):
+    """detection_hint 문자열을 조사·공백 변형 허용 정규식으로 변환.
+
+    일반화 규칙 (v1.32):
+      1. 어절 끝에 명시적 조사가 있으면 그 조사를 광범위 옵셔널 그룹으로 변환
+         예: "약수가" → "약수[은는이가을를과와에서도만뿐]?"
+      2. 어절 끝이 한글이지만 명시적 조사가 없어도 옵셔널 조사 허용
+         예: "약수" → "약수[은는이가을를과와에서도만뿐]?"
+      3. 어절 사이 공백은 \\s* (0+ 공백)
+      4. 숫자·영문은 escape 그대로
+
+    예:
+      "약수가 3개"   → "약수[은는이가을를과와에서도만뿐]?\\s*3개[은는이가을를과와에서도만뿐]?"
+      "1과 자기자신"  → "1[은는이가을를과와에서도만뿐]?\\s*자기\\s*자신[은는이가을를과와에서도만뿐]?"
+      "23은 소수"    → "23[은는이가을를과와에서도만뿐]?\\s*소수[은는이가을를과와에서도만뿐]?"
+
+    이 변환으로 "약수가 3개" hint가 "4의 약수는 3개인거같은데" text를 매칭한다.
+    """
+    if not hint:
+        return None
+    parts = hint.split()
+    out_parts = []
+    for part in parts:
+        if not part:
+            continue
+        # 어절 끝이 명시적 조사면 그 자리에 옵셔널 조사 그룹
+        if len(part) >= 2 and part[-1] in _PARTICLE_CHARS:
+            head = re.escape(part[:-1])
+            out_parts.append(f"{head}[{_PARTICLE_CHARS}]?")
+        # 끝이 한글(받침 무관)이면 옵셔널 조사 허용
+        elif _HANGUL_RE.match(part[-1]):
+            out_parts.append(re.escape(part) + f"[{_PARTICLE_CHARS}]?")
+        else:
+            # 숫자, 영문, 특수문자
+            out_parts.append(re.escape(part))
+    return r"\s*".join(out_parts)
+
+
+def _fuzzy_match(hint, text):
+    """hint를 fuzzy 정규식으로 변환해 text에서 매칭 시도.
+
+    Strict substring과 fuzzy 정규식 둘 다 시도해 하나라도 맞으면 True.
+    """
+    if not hint or not text:
+        return False
+    if hint in text:
+        return True
+    pat = _hint_to_fuzzy_regex(hint)
+    if pat:
+        try:
+            if re.search(pat, text):
+                return True
+        except re.error:
+            pass
+    return False
+
+
 _DEFINITION_PATTERNS = [
     # "소수는 약수가 2개인 수" — 소수 정의 단언
     re.compile(r"소수\s*(는|란|이란)\s*[^?\n]*약수\s*(가|는|이)?\s*\d+\s*개"),
@@ -814,15 +875,160 @@ class CollaborativeSession:
                 "must_avoid": "새로운 개념 도입, 긴 설명, 두 개 이상의 질문",
             }
 
+    def _detect_user_repeat_or_frustration(self, user_utterance):
+        """사용자가 같은 답변 반복 OR 짜증 신호를 보냈는지 일반적으로 감지.
+
+        주제·숫자에 무관한 일반 휴리스틱:
+          (A) 짜증 어구 — "했잖아", "방금 말", "라고 했다", "이미 ~", "내가 ~라고"
+          (B) 반복 답변 — 최근 사용자 발화 3개 중 2개 이상이 같은 핵심 토큰
+              (숫자 N + 단위 "개"·"뿐" 또는 동일 분류어 "소수"·"합성수")
+              을 공유
+
+        반환: 감지되면 dict {"signal": "frustration"|"repeat", "evidence": str},
+              아니면 None.
+        """
+        if not user_utterance:
+            return None
+
+        # (A) 짜증 어구
+        frustration_pat = re.compile(
+            r"(했잖아|했다고|했었|방금\s*말|이미\s*말|내가\s*[^?\n]*라고|"
+            r"진짜\s*아까|아까\s*말|또\s*묻|또\s*같은|그건\s*아까|"
+            r"답\s*했|들었잖|봤잖)"
+        )
+        if frustration_pat.search(user_utterance):
+            return {"signal": "frustration", "evidence": user_utterance[:60]}
+
+        # (B) 반복 답변 — 최근 사용자 3개 발화에서 핵심 토큰 비교
+        recent_user = [user_utterance]
+        for m in reversed(self.conversation[-12:]):
+            if (m.get("speaker") == "사용자"
+                    and m.get("content") != user_utterance):
+                recent_user.append(m.get("content", "") or "")
+            if len(recent_user) >= 3:
+                break
+        if len(recent_user) < 2:
+            return None
+
+        # 핵심 토큰 추출: 숫자+단위, 분류어, 정의 표현
+        def _key_tokens(u):
+            tokens = set()
+            # 숫자 + 약수/개/뿐
+            for m in re.finditer(r"(\d+)\s*(개|뿐)", u):
+                tokens.add(f"{m.group(1)}{m.group(2)}")
+            # "X의 약수" 패턴
+            for m in re.finditer(r"(\d+)\s*의\s*약수", u):
+                tokens.add(f"div_{m.group(1)}")
+            # 분류어
+            if "소수" in u and ("아니" not in u and "둘 다" not in u):
+                tokens.add("classify_prime")
+            if "합성수" in u and ("아니" not in u):
+                tokens.add("classify_composite")
+            if "둘 다 아니" in u or "소수도 합성수도" in u:
+                tokens.add("classify_neither")
+            return tokens
+
+        token_sets = [_key_tokens(u) for u in recent_user[:3]]
+        # 두 발화 이상에 같은 토큰이 등장하면 반복으로 간주
+        from collections import Counter
+        all_tokens = []
+        for s in token_sets:
+            all_tokens.extend(s)
+        cnt = Counter(all_tokens)
+        repeated = [t for t, c in cnt.items() if c >= 2]
+        if repeated:
+            return {"signal": "repeat", "evidence": ",".join(repeated)}
+
+        return None
+
+    def _next_missing_required(self, stage_num=None):
+        """현재 Stage에서 사용자 미달성 필수(prio=필수) 체크포인트 첫 번째 반환.
+
+        없으면 미달성 권장, 그것도 없으면 None.
+        """
+        stage_num = stage_num or self.current_stage
+        stage = self.task["stages"].get(str(stage_num)) or {}
+        user_prog = (
+            (self.learner_models.get("user", {}).get("checkpoint_progress") or {})
+            .get(str(stage_num)) or {}
+        )
+        prio_rank = {"필수": 0, "권장": 1, "보너스": 2}
+        sorted_cps = sorted(
+            stage.get("checkpoints") or [],
+            key=lambda cp: (prio_rank.get(cp.get("priority"), 99),
+                            cp.get("id", "")),
+        )
+        for cp in sorted_cps:
+            if not user_prog.get(cp.get("id"), {}).get("hit"):
+                return cp
+        return None
+
+    def _apply_loop_pivot(self, decision, user_utterance):
+        """사용자 반복 답변/짜증 감지 시 directive를 다음 미달성 체크포인트로 강제 pivot.
+
+        v1.31 까지의 1번 약수 하드코딩을 제거하고 일반화. 주제·숫자 무관하게:
+          1. 짜증 신호("했잖아") OR 같은 답변 2회 반복 감지
+          2. 다음 미달성 필수 체크포인트 식별
+          3. directive `speech_goal`을 그 체크포인트의 knowledge로 향하게 override
+        """
+        signal = self._detect_user_repeat_or_frustration(user_utterance)
+        if not signal:
+            return
+
+        next_cp = self._next_missing_required()
+        if not next_cp:
+            # 모든 체크포인트 hit — Stage 종료 흐름이 처리할 일
+            return
+
+        cp_id = next_cp.get("id")
+        cp_know = next_cp.get("knowledge", "")
+        print(f"       · [loop-pivot] 사용자 {signal['signal']} 감지 "
+              f"(evidence='{signal['evidence']}') → directive를 {cp_id} pivot")
+
+        # 발화자 선정: 진행자(서연) 우선. 단 직전 turn에 서연이 발화했으면 민준.
+        last_speaker_aid = None
+        for m in reversed(self.conversation[-6:]):
+            if m.get("agent_id"):
+                last_speaker_aid = m.get("agent_id")
+                break
+        speaker = "ai_2" if last_speaker_aid != "ai_2" else "ai_1"
+
+        decision["speaking_agents"] = [speaker]
+        for other in self.AI_KEYS:
+            if other != speaker:
+                decision[f"{other}_directive"] = None
+        decision[f"{speaker}_directive"] = {
+            "role": f"{'서연' if speaker == 'ai_2' else '민준'} — pivot to {cp_id}",
+            "speech_goal": (
+                f"사용자가 직전 답변을 충분히 이미 말했다. 짧게 인정한 뒤, "
+                f"다음 미달성 체크포인트({cp_id}: {cp_know})로 자연스럽게 넘어가는 "
+                f"새 질문을 1개 던진다."
+            ),
+            "must_include": (
+                "사용자 직전 답에 대한 짧은 인정 1마디 + "
+                f"{cp_id}({cp_know})를 향한 새 질문 1개"
+            ),
+            "must_avoid": (
+                "사용자가 직전에 답한 내용 재질문 절대 금지, 정의 단언, "
+                "약수 직접 나열, 30자 초과, 같은 주제 반복"
+            ),
+        }
+
     def current_stage_info(self):
         return self.task["stages"][str(self.current_stage)]
 
     def _keyword_match_checkpoints(self, user_utterance, stage):
-        """사용자 발화에 detection_hints 키워드가 등장하면 그 체크포인트 hit.
+        """사용자 발화에 detection_hints가 등장하면 그 체크포인트 hit (fuzzy 매칭).
 
-        LLM이 hit 판정을 놓치는 경우 안전장치. 단순 substring 매칭이지만
-        체크포인트의 detection_hints가 `["약수", "23은 소수"]` 식으로 명시돼
-        있어 false positive 위험 낮음.
+        v1.32부터 strict substring 매칭 → fuzzy 정규식 자동 변환:
+          - 조사 정규화: "약수가 3개" → "약수[가는이]?\\s*3\\s*개"
+            → "약수가 3개", "약수는 3개", "약수 3개" 모두 매칭
+          - 접속사 정규화: "1과 자기자신" → "1[과와]\\s*자기\\s*자신"
+          - 공백 유연화: 한글 단어 사이 공백 0~2개 허용
+          - 숫자 단위: "3개" 다음에 "야/네/잖/뿐/만" 등 종결어 무관
+
+        LLM이 hit 판정을 놓치거나 detection_hints가 사용자 발화 변형을 못 잡는
+        경우 안전장치. fuzzy 변환으로 false negative 대폭 감소.
 
         반환: hit된 cp_id 리스트 (중복 제거).
         """
@@ -832,10 +1038,25 @@ class CollaborativeSession:
         hit_ids = []
         for cp in stage.get("checkpoints") or []:
             cid = cp.get("id")
-            for hint in cp.get("detection_hints") or []:
-                if hint and hint in text:
-                    hit_ids.append(cid)
-                    break  # 한 cp 안에서 여러 hint 매칭해도 1번만 추가
+            matched = False
+            # 1. detection_patterns (선택) — 명시적 정규식
+            for pat_str in cp.get("detection_patterns") or []:
+                try:
+                    if re.search(pat_str, text):
+                        matched = True
+                        break
+                except re.error:
+                    continue
+            # 2. detection_hints (자동 fuzzy 변환)
+            if not matched:
+                for hint in cp.get("detection_hints") or []:
+                    if not hint:
+                        continue
+                    if _fuzzy_match(hint, text):
+                        matched = True
+                        break
+            if matched:
+                hit_ids.append(cid)
         # 중복 제거 + 순서 보존
         seen = set()
         out = []
@@ -1461,6 +1682,8 @@ class CollaborativeSession:
                 print(f"       · [checkpoint fallback-keyword] 실패: {e}")
 
             self._stage_complete_safety_net(decision, user_utterance)
+            # 사용자 반복 답변 감지 → directive 강제 pivot (stage_gate 이전)
+            self._apply_loop_pivot(decision, user_utterance)
             # fallback 경로에서도 2단계 게이트 적용 (조건 충족 시 바로 advance 방지)
             self._apply_stage_gate(decision, user_utterance)
             # 사용자가 특정 AI를 지목했다면 모든 자동 규칙보다 우선 적용
@@ -1566,6 +1789,10 @@ class CollaborativeSession:
         self._cap_single_speaker(decision)  # 기본 1명 발화 강제 (rotation 후 단계)
         # stage_complete 안전망: 위에서 progress 갱신 후 호출되므로 최신 상태 반영
         self._stage_complete_safety_net(decision, user_utterance)
+
+        # --- 사용자 반복 답변 감지 → directive 강제 pivot ---
+        # AI가 같은 질문을 또 만들어내는 루프 차단 (rotation/cap 이후, gate 이전)
+        self._apply_loop_pivot(decision, user_utterance)
 
         # --- Stage 완료 2단계 게이트 (승인 확인) ---
         self._apply_stage_gate(decision, user_utterance)
