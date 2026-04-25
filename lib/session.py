@@ -9,6 +9,7 @@
 - 사용자 교수자 모드: 사용자가 설명자 모드가 되면 AI는 학습자 모드로 전환해 짧게 반응
 """
 
+import re
 import time
 import queue
 import threading
@@ -182,6 +183,116 @@ def _trim_to_last_complete_sentence(text: str) -> str:
         if s[i] in ".!?":
             return s[: i + 1]
     return ""
+
+
+_DIVISOR_PATTERNS = [
+    # "X의 약수는 1, 2" / "X의 약수가 1과 2" / "X의 약수를 1,2,4"
+    re.compile(r"\d+\s*의\s*약수(는|가|를|로)\s*\d+\s*[,과와및]"),
+    # "X는 약수가 1과 2" / "X은 약수로 1, 2"
+    re.compile(r"\d+\s*(은|는|이|가)\s*약수(가|로|는|를)\s*\d+\s*[,과와및]"),
+    # "X는 약수가 N개" / "X는 약수 N개" — 개수 단언 (조사 가/는 옵션)
+    re.compile(r"\d+\s*(은|는|이|가)\s*약수(가|는|이)?\s*\d+\s*개"),
+    # "약수가 1, 2 (과/와/만/뿐/야)" — 약수 본인이 풀어주기
+    re.compile(r"약수(가|는)\s*\d+\s*[,과와]\s*\d+"),
+    # "약수는 1과 자기자신" / "약수가 1과 N뿐"
+    re.compile(r"약수(는|가)\s*1\s*[,과와]\s*(자기|자신|본인|\d+)"),
+    # "X의 약수가 N개" 식 단언 ("4의 약수가 3개잖아")
+    re.compile(r"\d+\s*의\s*약수(가|는)\s*\d+\s*개"),
+    # "약수가 N개야/잖아/이야" — 주어 없이 개수만 단언
+    re.compile(r"약수(가|는)\s*\d+\s*개\s*(야|이야|잖|네|이|라)"),
+]
+
+
+def _strip_divisor_listing(text: str) -> str:
+    """약수 나열을 포함한 발화에서 위반 부분을 제거하고 질문 형태로 치환.
+
+    재생성도 실패한 경우의 최후 fallback. AI 발화의 '2의 약수는 1, 2고'
+    같은 부분을 통째로 제거하고 가장 안전한 generic 질문으로 대체.
+
+    실측 케이스:
+      "예를 들어 2랑 3을 봐볼래? 2의 약수는 1, 2고 3의 약수는 1, 3이야. 공통점이 뭐 있어?"
+      → "예를 들어 2랑 3을 봐볼래? 약수가 뭐가 있는지 같이 세어볼까?"
+    """
+    if not text:
+        return "음, 같이 한 번 봐볼래?"
+    s = text.strip()
+    # 약수 나열 절을 통째로 제거 (문장 단위 분할 후 위반 문장 drop)
+    sentences = re.split(r'(?<=[.!?])\s+', s)
+    safe = [sent for sent in sentences if not _ai_lists_divisors(sent)]
+    if safe:
+        result = " ".join(safe).strip()
+        # 결과가 너무 짧으면 질문 보강
+        if len(result) < 8:
+            result = result.rstrip(".?!") + " 약수가 뭘까?"
+        return result
+    # 모든 문장이 위반이면 generic
+    return "음, 약수가 뭐가 있는지 같이 세어볼래?"
+
+
+_WHY_ONE_PATTERNS = [
+    # "1은 왜 소수도 합성수도 아닌 거야" / "1이 왜 ... 아닐까" / "아니야"
+    re.compile(r"1\s*(은|는|이|가)\s*왜\s*[^?\n]*소수[^?\n]*합성수[^?\n]*(아닌|아니|아냐|아닐)"),
+    # "왜 1은 소수도 합성수도 아니야"
+    re.compile(r"왜\s*1\s*(은|는|이|가)?\s*[^?\n]*소수[^?\n]*합성수[^?\n]*(아닌|아니|아냐|아닐)"),
+    # "1이 둘 다 아닌 이유" / "1은 둘 다 아닌 이유"
+    re.compile(r"1\s*(은|는|이|가)\s*둘\s*다\s*아닌\s*이유"),
+    # "1이 왜 둘 다 아닌" / "왜 둘 다 아닐까"
+    re.compile(r"1\s*(은|는|이|가)\s*왜\s*[^?\n]*둘\s*다\s*(아닌|아니|아냐|아닐)"),
+    # "1은 소수도 합성수도 아닌 이유"
+    re.compile(r"1\s*(은|는)\s*소수[^?\n]*합성수[^?\n]*아닌\s*이유"),
+]
+
+
+def _ai_asks_why_one_excluded(text: str) -> bool:
+    """AI 발화가 '1이 왜 둘 다 아닌지' 이유를 묻는지 탐지.
+
+    s1-3/s1-5(1의 예외성) 체크포인트 보호용. 이런 질문 자체가 "1은 둘 다 아니다"를
+    전제로 깔아 사용자가 그 명제를 도출할 기회를 박탈한다.
+
+    허용 형태(detect 대상 아님):
+      - "1은 소수야 합성수야?" (binary 분류 질문)
+      - "1의 약수는 뭐야?"
+      - "1은 어떻게 분류해야 할까?"
+
+    탐지 대상(모두 위반):
+      - "1은 왜 소수도 합성수도 아닌 거야?"
+      - "1이 왜 둘 다 아닐까?"
+      - "1이 둘 다 아닌 이유가 뭐야?"
+    """
+    if not text:
+        return False
+    s = text.strip()
+    for pat in _WHY_ONE_PATTERNS:
+        if pat.search(s):
+            return True
+    return False
+
+
+def _ai_lists_divisors(text: str) -> bool:
+    """AI 발화가 약수를 직접 나열/단언하는지 정규식으로 탐지.
+
+    s1-1(약수 어휘 사용) 체크포인트 보호용. 사용자가 약수를 발화하기 전에
+    AI가 약수 정보를 발화하면 hit이 박탈된다. 모델이 프롬프트 규칙을 무시하는
+    실측 사례가 잦아 런타임 차단 필터로 보강.
+
+    탐지 대상 (모두 위반):
+      - "2의 약수는 1, 2" (직접 나열)
+      - "2는 약수가 1과 2" (관계절)
+      - "2는 약수 2개" (개수 단언)
+      - "약수가 1과 2" (주어 생략된 나열)
+
+    탐지 제외:
+      - "약수가 뭐야?" / "약수 세어볼래?" (질문)
+      - "1의 약수는 1뿐이야" — 1은 사용자가 흔히 도출하는 자명 케이스가 아니므로
+        그래도 탐지 대상에 포함 (이때도 사용자에게 묻는 게 맞음)
+    """
+    if not text:
+        return False
+    s = text.strip()
+    for pat in _DIVISOR_PATTERNS:
+        if pat.search(s):
+            return True
+    return False
 
 
 def _is_incomplete_utterance(s: str) -> bool:
@@ -1058,6 +1169,56 @@ class CollaborativeSession:
         raw = self.api.call(prompt, max_tokens=280, temperature=0.9)
         text = sanitize_ai_output(raw)
 
+        # 약수 나열 위반 시 1회 강제 재생성 (미완결 검사보다 먼저)
+        if _ai_lists_divisors(text):
+            print(f"       · [ai_utterance {student_key}] 약수 나열 위반 감지 — 강제 재생성")
+            divisor_block = (
+                "\n\n---\n[강제 재생성 — 약수 나열 위반]: 직전 응답이 'X의 약수는 Y, Z' 또는 "
+                "'X는 약수가 ~' 같은 형태로 약수 정보를 포함했다. 이는 s1-1 체크포인트 박탈 위반이다. "
+                "다시 작성하되 다음을 엄수:\n"
+                "- 발화에 **숫자 자체(예: 2, 4)는 등장 OK**, 그 숫자의 **약수가 무엇인지는 절대 발화 금지**.\n"
+                "- 약수는 사용자가 답할 부분이다. '약수가 뭐야?' / '약수 세어볼래?'처럼 질문으로만 던질 것.\n"
+                "- 한 문장 + 한 질문, 30자 이내로 짧게.\n"
+                "- 예: '2를 한 번 봐볼래? 약수가 뭐야?'\n"
+            )
+            try:
+                raw_dv = self.api.call(prompt + divisor_block, max_tokens=160,
+                                        temperature=1.0)
+                text_dv = sanitize_ai_output(raw_dv)
+                if text_dv and not _ai_lists_divisors(text_dv):
+                    text = text_dv
+                else:
+                    # 재생성도 위반 → 정규식으로 약수 나열 부분 제거
+                    text = _strip_divisor_listing(text)
+            except Exception as e:
+                print(f"       · [ai_utterance {student_key}] 약수 재생성 실패: {e}")
+                text = _strip_divisor_listing(text)
+
+        # '1이 왜 둘 다 아닌지' 이유 묻기 위반 시 강제 재생성 (s1-3/s1-5 보호)
+        if _ai_asks_why_one_excluded(text):
+            print(f"       · [ai_utterance {student_key}] 1의 이유 묻기 위반 감지 — 강제 재생성")
+            why_block = (
+                "\n\n---\n[강제 재생성 — 1의 이유 묻기 위반]: 직전 응답이 '1은 왜 소수도 합성수도 "
+                "아닌 거야?' 같은 형태로 결론을 전제로 깔고 이유를 요구했다. s1-3/s1-5 체크포인트 박탈.\n"
+                "- '왜'라는 단어는 1과 함께 절대 사용 금지.\n"
+                "- 허용 형태는 단 두 가지: (a) '1의 약수는 뭐야?' 또는 (b) '1은 그럼 소수야 합성수야?'\n"
+                "- 사용자가 입으로 '둘 다 아니야'라고 답해야 hit이 잡힘. AI는 결론을 전제하지 말 것.\n"
+                "- 30자 이내로 짧게. 예: '1은 그럼 소수야 합성수야?'\n"
+            )
+            try:
+                raw_w = self.api.call(prompt + why_block, max_tokens=120,
+                                       temperature=1.0)
+                text_w = sanitize_ai_output(raw_w)
+                if text_w and not _ai_asks_why_one_excluded(text_w) \
+                        and not _ai_lists_divisors(text_w):
+                    text = text_w
+                else:
+                    # 재생성도 위반 → 안전한 binary 질문으로 강제 치환
+                    text = "1은 그럼 소수야 합성수야?"
+            except Exception as e:
+                print(f"       · [ai_utterance {student_key}] 이유 재생성 실패: {e}")
+                text = "1은 그럼 소수야 합성수야?"
+
         # 미완결이면 최대 2회 재시도
         if _is_incomplete_utterance(text):
             print(f"       · [ai_utterance {student_key}] 미완결({len(text)}자, '{text[-10:] if text else ''}') — 1차 재시도")
@@ -1498,6 +1659,52 @@ class CollaborativeSession:
                     buf.append(chunk)
                     q.put(("update", aid, chunk))
                 full = sanitize_ai_output("".join(buf))
+                # 약수 나열 위반 시 강제 재생성 — incomplete 검사보다 우선
+                if _ai_lists_divisors(full):
+                    print(f"       · [ai_stream {aid}] 약수 나열 위반 감지 — 강제 재생성")
+                    q.put(("buffering", aid, full))
+                    divisor_block = (
+                        "\n\n---\n[강제 재생성 — 약수 나열 위반]: 직전 응답이 'X의 약수는 Y, Z' "
+                        "또는 'X는 약수가 ~' 형태로 약수 정보를 포함했다. s1-1 체크포인트 박탈.\n"
+                        "- 발화에 **숫자(예: 2, 4)는 등장 OK**, 그 숫자의 **약수가 무엇인지는 절대 발화 금지**.\n"
+                        "- 약수는 사용자가 답할 부분. '약수가 뭐야?' / '약수 세어볼래?' 형태로만.\n"
+                        "- 한 문장 + 한 질문, 30자 이내. 예: '2를 한 번 봐볼래? 약수가 뭐야?'\n"
+                    )
+                    try:
+                        raw_dv = self.api.call(prompt + divisor_block, max_tokens=160,
+                                                temperature=1.0)
+                        full_dv = sanitize_ai_output(raw_dv)
+                        if full_dv and not _ai_lists_divisors(full_dv):
+                            full = full_dv
+                        else:
+                            full = _strip_divisor_listing(full)
+                    except Exception as e:
+                        print(f"       · [ai_stream {aid}] 약수 재생성 실패: {e}")
+                        full = _strip_divisor_listing(full)
+
+                # '1이 왜 둘 다 아닌지' 이유 묻기 위반 시 강제 재생성
+                if _ai_asks_why_one_excluded(full):
+                    print(f"       · [ai_stream {aid}] 1의 이유 묻기 위반 감지 — 강제 재생성")
+                    q.put(("buffering", aid, full))
+                    why_block = (
+                        "\n\n---\n[강제 재생성 — 1의 이유 묻기 위반]: '1은 왜 소수도 합성수도 "
+                        "아닌 거야?' 같이 결론 전제 + 이유 요구. s1-3/s1-5 박탈.\n"
+                        "- '왜'를 1과 함께 사용 금지. 허용 형태 두 가지: (a) '1의 약수는 뭐야?' "
+                        "또는 (b) '1은 그럼 소수야 합성수야?'\n"
+                        "- 사용자가 '둘 다 아니야'라고 직접 답해야 hit. 30자 이내.\n"
+                    )
+                    try:
+                        raw_w = self.api.call(prompt + why_block, max_tokens=120,
+                                               temperature=1.0)
+                        full_w = sanitize_ai_output(raw_w)
+                        if full_w and not _ai_asks_why_one_excluded(full_w) \
+                                and not _ai_lists_divisors(full_w):
+                            full = full_w
+                        else:
+                            full = "1은 그럼 소수야 합성수야?"
+                    except Exception as e:
+                        print(f"       · [ai_stream {aid}] 이유 재생성 실패: {e}")
+                        full = "1은 그럼 소수야 합성수야?"
                 # 스트림 종료 시점에 buffering 이벤트 — UI에서 커서 제거하고
                 # 재시도 동안 "..." 같은 표시로 상태 분명히 (사용자가 "잘림" 오해 방지)
                 if _is_incomplete_utterance(full):
