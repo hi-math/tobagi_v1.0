@@ -229,6 +229,52 @@ def _strip_divisor_listing(text: str) -> str:
     return "음, 약수가 뭐가 있는지 같이 세어볼래?"
 
 
+_DEFINITION_PATTERNS = [
+    # "소수는 약수가 2개인 수" — 소수 정의 단언
+    re.compile(r"소수\s*(는|란|이란)\s*[^?\n]*약수\s*(가|는|이)?\s*\d+\s*개"),
+    # "합성수는 약수가 N개 이상인 수" — 합성수 정의
+    re.compile(r"합성수\s*(는|란|이란)\s*[^?\n]*약수\s*(가|는|이)?\s*\d+\s*개"),
+    # "약수가 N개면/이면/이라면/이상이면 소수" — 조건절 정의 (이상/이하/초과/미만 허용)
+    re.compile(r"약수\s*(가|는|이|의\s*개수가)?\s*\d+\s*개\s*(이상|이하|초과|미만)?\s*(면|이면|이라면|인|인\s*수|인수)\s*[^?\n]*소수"),
+    # "약수가 N개면/이상이면/이라면 합성수"
+    re.compile(r"약수\s*(가|는|이|의\s*개수가)?\s*\d+\s*개\s*(이상|이하|초과|미만)?\s*(면|이면|이라면|인|인\s*수|인수)\s*[^?\n]*합성수"),
+    # "소수는 ~ 합성수는 ~" — 한 문장에서 둘 다 정의
+    re.compile(r"소수\s*(는|란|이란)[^.!?\n]{1,40}(이고|이며|이고는|이고,|,)\s*합성수\s*(는|란|이란)"),
+    # "소수는 ~ 합성수는 그게 아닌" — 사용자 사례 (직접 금지)
+    re.compile(r"소수\s*(는|란)[^.!?\n]*합성수\s*(는|란)\s*[^.!?\n]*아닌"),
+    # "1과 자기 자신만 (을) 약수로" — 정의 일부
+    re.compile(r"1\s*(과|와)\s*자기\s*자신(만|뿐)?\s*[^?\n]*약수"),
+    # "약수가 자기자신과 1뿐"
+    re.compile(r"약수\s*(가|는)\s*[^?\n]*자기\s*자신[^?\n]*뿐"),
+]
+
+
+def _ai_states_definition(text: str) -> bool:
+    """AI 발화가 소수/합성수 정의를 직접 단언하는지 정규식으로 탐지.
+
+    s1-2(소수 정의) / s1-3(합성수 정의) 체크포인트 보호용. 정의는 사용자가
+    귀납으로 도출해야 hit. AI가 통째로 제시하면 학습 기회가 사라진다.
+
+    탐지 대상 (모두 위반):
+      - "소수는 약수가 2개인 수"
+      - "합성수는 약수가 3개 이상인 수"
+      - "약수가 2개면 소수"
+      - "소수는 ~고 합성수는 그게 아닌 수"
+      - "1과 자기 자신만 약수로 가지는"
+
+    탐지 제외 (질문 형태):
+      - "소수가 뭐야?" / "합성수가 뭐 같아?" (정의 묻기)
+      - "약수가 몇 개야?" (개수 묻기)
+    """
+    if not text:
+        return False
+    s = text.strip()
+    for pat in _DEFINITION_PATTERNS:
+        if pat.search(s):
+            return True
+    return False
+
+
 _WHY_ONE_PATTERNS = [
     # "1은 왜 소수도 합성수도 아닌 거야" / "1이 왜 ... 아닐까" / "아니야"
     re.compile(r"1\s*(은|는|이|가)\s*왜\s*[^?\n]*소수[^?\n]*합성수[^?\n]*(아닌|아니|아냐|아닐)"),
@@ -1194,6 +1240,28 @@ class CollaborativeSession:
                 print(f"       · [ai_utterance {student_key}] 약수 재생성 실패: {e}")
                 text = _strip_divisor_listing(text)
 
+        # 정의 단언 위반 시 강제 재생성 (s1-2/s1-3 보호)
+        if _ai_states_definition(text):
+            print(f"       · [ai_utterance {student_key}] 정의 단언 위반 감지 — 강제 재생성")
+            def_block = (
+                "\n\n---\n[강제 재생성 — 정의 단언 위반]: 직전 응답이 '소수는 약수가 N개', "
+                "'합성수는 ~', '약수가 N개면 소수/합성수' 같은 정의를 포함했다. s1-2/s1-3 박탈.\n"
+                "- 정의·구분 기준은 사용자가 입으로 도출해야 함. AI가 단언 절대 금지.\n"
+                "- 대신 '약수가 뭐야?' / '몇 개야?' / '어떻게 분류해?' 같은 질문으로만.\n"
+                "- 30자 이내 짧게.\n"
+            )
+            try:
+                raw_d = self.api.call(prompt + def_block, max_tokens=160, temperature=1.0)
+                text_d = sanitize_ai_output(raw_d)
+                if text_d and not _ai_states_definition(text_d) \
+                        and not _ai_lists_divisors(text_d):
+                    text = text_d
+                else:
+                    text = "음, 그럼 약수부터 같이 세어볼까?"
+            except Exception as e:
+                print(f"       · [ai_utterance {student_key}] 정의 재생성 실패: {e}")
+                text = "음, 그럼 약수부터 같이 세어볼까?"
+
         # '1이 왜 둘 다 아닌지' 이유 묻기 위반 시 강제 재생성 (s1-3/s1-5 보호)
         if _ai_asks_why_one_excluded(text):
             print(f"       · [ai_utterance {student_key}] 1의 이유 묻기 위반 감지 — 강제 재생성")
@@ -1682,6 +1750,28 @@ class CollaborativeSession:
                         print(f"       · [ai_stream {aid}] 약수 재생성 실패: {e}")
                         full = _strip_divisor_listing(full)
 
+                # 정의 단언 위반 시 강제 재생성 (s1-2/s1-3 보호)
+                if _ai_states_definition(full):
+                    print(f"       · [ai_stream {aid}] 정의 단언 위반 감지 — 강제 재생성")
+                    q.put(("buffering", aid, full))
+                    def_block = (
+                        "\n\n---\n[강제 재생성 — 정의 단언 위반]: '소수는 약수가 N개', "
+                        "'합성수는 ~', '약수가 N개면 소수' 같은 정의 포함. s1-2/s1-3 박탈.\n"
+                        "- 정의는 사용자가 입으로 도출. AI 단언 금지.\n"
+                        "- 대신 '약수가 뭐야?' / '어떻게 분류해?' 식 질문으로만. 30자 이내.\n"
+                    )
+                    try:
+                        raw_d = self.api.call(prompt + def_block, max_tokens=160, temperature=1.0)
+                        full_d = sanitize_ai_output(raw_d)
+                        if full_d and not _ai_states_definition(full_d) \
+                                and not _ai_lists_divisors(full_d):
+                            full = full_d
+                        else:
+                            full = "음, 그럼 약수부터 같이 세어볼까?"
+                    except Exception as e:
+                        print(f"       · [ai_stream {aid}] 정의 재생성 실패: {e}")
+                        full = "음, 그럼 약수부터 같이 세어볼까?"
+
                 # '1이 왜 둘 다 아닌지' 이유 묻기 위반 시 강제 재생성
                 if _ai_asks_why_one_excluded(full):
                     print(f"       · [ai_stream {aid}] 1의 이유 묻기 위반 감지 — 강제 재생성")
@@ -1901,6 +1991,32 @@ class CollaborativeSession:
         raw = self.api.call(prompt, max_tokens=600, temperature=0.8)
         print(f"       · [stage_intro raw len={len(raw)}] {raw[:120]!r}...")
         text = sanitize_ai_output(raw)
+
+        # 정의 단언 위반 시 강제 재생성 (체크포인트 박탈 방지)
+        if _ai_states_definition(text):
+            print(f"       · [stage_intro] 정의 단언 위반 감지 — 강제 재생성")
+            def_block = (
+                "\n\n---\n[강제 재생성 — 정의 단언 위반]: 직전 응답에 '소수는 약수가 N개', "
+                "'합성수는 ~', '약수가 N개면 소수' 같은 정의가 포함됐다. intro에서 정의를 제시하면 "
+                "활동의 핵심 학습 기회가 사라진다.\n"
+                "- 정의·구분 기준·약수 개수 등 핵심 변별 단서를 절대 발화하지 말 것.\n"
+                "- 단어만 던지고 답은 사용자에게 맡길 것.\n"
+                "- 예: '자, 이번엔 소수랑 합성수가 뭔지 같이 얘기해 볼 차례야. 다들 어떻게 생각해?'\n"
+                "- 2~3문장, 열린 질문 하나로 마무리.\n"
+            )
+            try:
+                raw_d = self.api.call(prompt + def_block, max_tokens=400, temperature=1.0)
+                text_d = sanitize_ai_output(raw_d)
+                if text_d and not _ai_states_definition(text_d):
+                    text = text_d
+                    print(f"       · [stage_intro] 정의 위반 재생성 성공")
+                else:
+                    # 재생성 실패 — 하드코딩 fallback 사용
+                    print(f"       · [stage_intro] 정의 위반 재생성 실패 — fallback")
+                    text = ""  # 아래 fallback 트리거
+            except Exception as e:
+                print(f"       · [stage_intro] 정의 재생성 실패: {e}")
+                text = ""
 
         # 불완전(길이 짧음 or 문장 미종결)이면 재시도 (모듈 레벨 헬퍼 사용)
         _is_incomplete = _is_incomplete_utterance
