@@ -762,21 +762,12 @@ class CollaborativeSession:
         # === 보조 경로: 발화 키워드 — progress 업데이트 늦을 때만 활용 ===
         # 단, 주 경로가 미완료여도 여기서 자동 완료시키지는 않고 진단 목적으로만 로그.
         if not hit_reason and stage_num == 1:
-            # s1-2: "약수 2개" 또는 "1과 자기자신만"
+            # s1-2: 분류 기준 발견 — 약수 2개 또는 1과 자기자신만
             s12 = any(k in combined for k in [
-                "약수가 2개", "약수 2개", "약수 두개", "약수가 두 개",
-                "1과 자기자신", "1과 본인", "1과 자신",
+                "약수가 2개", "약수 2개", "약수 두개", "약수가 두 개", "약수 두 개",
+                "1과 자기자신", "1과 본인", "1과 자신만",
             ])
-            # s1-3: "약수 3개 이상"
-            s13 = any(k in combined for k in [
-                "약수가 3개", "3개 이상", "약수 여러 개", "다른 약수도",
-            ])
-            # s1-5: "1은 소수도 합성수도 아님"
-            s15 = any(k in combined for k in [
-                "1은 소수도 합성수도 아니", "1은 둘 다 아니",
-                "1은 소수 아니", "1은 합성수 아니", "1은 예외",
-            ])
-            print(f"       · [stage-guard s1 키워드] s1-2={s12} s1-3={s13} s1-5={s15}", flush=True)
+            print(f"       · [stage-guard s1 키워드] s1-2={s12}", flush=True)
 
         elif not hit_reason and stage_num == 2:
             has_23 = "23" in combined
@@ -788,10 +779,16 @@ class CollaborativeSession:
             print(f"       · [stage-guard s2 키워드] 23={has_23} 29={has_29} 나머지={others_covered}", flush=True)
 
         elif not hit_reason and stage_num == 3:
-            has_12 = "12" in combined
-            has_13 = "13" in combined
-            has_25 = "25" in combined
-            print(f"       · [stage-guard s3 키워드] 12={has_12} 13={has_13} 25={has_25}", flush=True)
+            # s3: '소수=홀수 거짓 + 반례 2' / '5의 배수=합성수 거짓 + 반례 5'
+            has_2_counter = any(k in combined for k in [
+                "2는 소수", "2가 소수", "2도 소수", "2는 짝수", "2 반례",
+            ])
+            has_5_counter = any(k in combined for k in [
+                "5는 소수", "5가 소수", "5도 소수", "5 반례", "5는 5의 배수",
+            ])
+            has_false_1 = any(k in combined for k in ["거짓", "아니다", "틀렸"])
+            print(f"       · [stage-guard s3 키워드] 거짓판단={has_false_1} "
+                  f"2반례={has_2_counter} 5반례={has_5_counter}", flush=True)
 
         if hit_reason:
             decision["stage_complete"] = True
@@ -1517,7 +1514,7 @@ class CollaborativeSession:
             user_silence_seconds=user_silence_seconds,
         )
         try:
-            raw = self.api.call(prompt, max_tokens=400, temperature=0.7)
+            raw = self.api.call(prompt, max_tokens=500, temperature=1.05)
         except Exception as e:
             print(f"       · [ai_utterance {student_key}] API 호출 실패: {e}", flush=True)
             raw = ""
@@ -1527,7 +1524,7 @@ class CollaborativeSession:
         if not text or len(text.strip()) < 3:
             print(f"       · [ai_utterance {student_key}] 빈 응답 — temperature 1.0 재시도", flush=True)
             try:
-                raw = self.api.call(prompt, max_tokens=400, temperature=1.0)
+                raw = self.api.call(prompt, max_tokens=500, temperature=0.9)
                 text = sanitize_ai_output(raw)
                 print(f"       · [ai_utterance {student_key}] 재시도 raw len="
                       f"{len(raw or '')} text={text[:80]!r}")
@@ -1931,9 +1928,9 @@ class CollaborativeSession:
             started = False
             buf = []
             try:
-                # max_tokens=480: 한글 2~4문장이 중간에서 잘리지 않도록 여유 부여
+                # v1.38: max_tokens=500 + temp=1.05 — 친구 말투 자연스럽게
                 stream = self.api.call(
-                    prompt, max_tokens=280, temperature=0.9, stream=True,
+                    prompt, max_tokens=500, temperature=1.05, stream=True,
                 )
                 for chunk in stream:
                     if not chunk:
@@ -1950,8 +1947,8 @@ class CollaborativeSession:
                 if not full or len(full.strip()) < 3:
                     print(f"       · [ai_stream {aid}] 빈 스트림 — non-streaming 재시도", flush=True)
                     try:
-                        raw_ns = self.api.call(prompt, max_tokens=400,
-                                                temperature=0.7, stream=False)
+                        raw_ns = self.api.call(prompt, max_tokens=500,
+                                                temperature=0.9, stream=False)
                         full = sanitize_ai_output(raw_ns)
                         print(f"       · [ai_stream {aid}] non-stream raw len="
                               f"{len(raw_ns or '')} text={full[:80]!r}")
@@ -2079,6 +2076,19 @@ class CollaborativeSession:
         persona = self.config["personas"]["ai_students"][opener_key]
         stage = self.current_stage_info()
 
+        # v1.39: stage에 intro_message가 있으면 그대로 학생 발화로 사용
+        # (Stage 2 진입 시 정의 안내처럼 명시적으로 보여줄 텍스트)
+        intro_msg = stage.get("intro_message")
+        if intro_msg:
+            text = intro_msg
+            print(f"       · [stage_intro] intro_message 직접 사용 ({len(text)}자)", flush=True)
+            self.conversation.append({
+                "speaker": persona["name"],
+                "content": text,
+                "stage": self.current_stage,
+            })
+            return text
+
         prompt = render_prompt(self.prompts["stage_intro"], {
             "opener_name": persona["name"],
             "stage_title": stage["title"],
@@ -2116,9 +2126,13 @@ class CollaborativeSession:
         if _is_incomplete(text):
             stage_num = self.current_stage
             fallback_by_stage = {
-                1: "자, 이번엔 소수랑 합성수가 뭔지 같이 얘기해 보자. 다들 어떻게 생각해?",
-                2: "자, 이번엔 20부터 30까지의 수 중에 소수가 뭐가 있는지 한번 찾아보자. 누가 먼저 해볼래?",
-                3: "자, 이번엔 진짜 문제야. 10보다 큰 최소 합성수랑 15보다 작은 최대 소수의 합을 구해보자. 어디서부터 시작해볼까?",
+                1: ("자, 이번엔 분류 문제야. 2부터 20까지의 수가 두 그룹으로 나눠져 있는데, "
+                    "왼쪽: 2, 3, 5, 7, 11, 13, 17, 19 / 오른쪽: 4, 6, 8, 9, 10, 12, 14, 15, 16, 18, 20. "
+                    "이 두 그룹은 어떤 기준으로 나눠진 걸까? 다들 어떻게 생각해?"),
+                2: ("이번엔 새로운 단계야. 20부터 30까지의 수 중에 소수를 모두 찾아보자. "
+                    "어디서부터 시작해볼까?"),
+                3: ("이번엔 참/거짓 판단이야. (1) '소수는 모두 홀수이다.' (2) '5의 배수는 모두 합성수이다.' "
+                    "둘 다 참인지 거짓인지 같이 생각해보자."),
             }
             text = fallback_by_stage.get(stage_num,
                 "자, 이번에는 새로운 걸 같이 얘기해볼까? 다들 어떻게 생각해?")
