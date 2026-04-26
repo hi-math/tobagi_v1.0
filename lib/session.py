@@ -1497,7 +1497,7 @@ class CollaborativeSession:
             "user_mode": user_mode,
             "silence_trigger": str(bool(silence_trigger)).lower(),
             "user_silence_seconds": f"{user_silence_seconds:.0f}",
-            "recent_dialogue": self.recent_dialogue(4),  # 8→4 턴
+            "recent_dialogue": self.recent_dialogue(10),  # v1.40: 4→10턴 (대화 흐름 살리기)
             "user_utterance": user_utterance,
         })
 
@@ -1549,7 +1549,7 @@ class CollaborativeSession:
             "stage_title": stage["title"],
             "core_question": stage["core_question"],
             "user_utterance": user_utterance,
-            "recent_dialogue": self.recent_dialogue(4),
+            "recent_dialogue": self.recent_dialogue(8),  # v1.40: 4→8턴 (분석 흐름 살리기)
             "user_learner_model": self._lm_summary(self.learner_models["user"]),
             "ai_1_learner_model": "(생략)",
             "ai_2_learner_model": "(생략)",
