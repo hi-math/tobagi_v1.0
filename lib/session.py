@@ -1514,7 +1514,7 @@ class CollaborativeSession:
             user_silence_seconds=user_silence_seconds,
         )
         try:
-            raw = self.api.call(prompt, max_tokens=500, temperature=1.05)
+            raw = self.api.call(prompt, max_tokens=500, temperature=1.0)
         except Exception as e:
             print(f"       · [ai_utterance {student_key}] API 호출 실패: {e}", flush=True)
             raw = ""
@@ -1524,7 +1524,7 @@ class CollaborativeSession:
         if not text or len(text.strip()) < 3:
             print(f"       · [ai_utterance {student_key}] 빈 응답 — temperature 1.0 재시도", flush=True)
             try:
-                raw = self.api.call(prompt, max_tokens=500, temperature=0.9)
+                raw = self.api.call(prompt, max_tokens=500, temperature=1.0)
                 text = sanitize_ai_output(raw)
                 print(f"       · [ai_utterance {student_key}] 재시도 raw len="
                       f"{len(raw or '')} text={text[:80]!r}")
@@ -1928,9 +1928,9 @@ class CollaborativeSession:
             started = False
             buf = []
             try:
-                # v1.38: max_tokens=500 + temp=1.05 — 친구 말투 자연스럽게
+                # v1.44: temp=1.0 통일 (사용자 요청)
                 stream = self.api.call(
-                    prompt, max_tokens=500, temperature=1.05, stream=True,
+                    prompt, max_tokens=500, temperature=1.0, stream=True,
                 )
                 for chunk in stream:
                     if not chunk:
@@ -1948,7 +1948,7 @@ class CollaborativeSession:
                     print(f"       · [ai_stream {aid}] 빈 스트림 — non-streaming 재시도", flush=True)
                     try:
                         raw_ns = self.api.call(prompt, max_tokens=500,
-                                                temperature=0.9, stream=False)
+                                                temperature=1.0, stream=False)
                         full = sanitize_ai_output(raw_ns)
                         print(f"       · [ai_stream {aid}] non-stream raw len="
                               f"{len(raw_ns or '')} text={full[:80]!r}")
