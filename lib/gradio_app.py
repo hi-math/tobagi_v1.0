@@ -237,6 +237,12 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                     history.append({"role": "assistant",
                                     "content": _stage_card(session.current_stage, s)})
                     yield _chat_only(history, clear_msg=False)
+                    # v1.42: intro_message가 있으면 시스템 정의 안내로 별도 버블 표시
+                    intro_msg = session.get_stage_intro_message()
+                    if intro_msg:
+                        history.append({"role": "assistant",
+                                        "content": _system_bubble(intro_msg)})
+                        yield _chat_only(history, clear_msg=False)
                     intro = session.stage_intro_utterance("ai_2")
                     history.extend(_bubble_messages("ai_2", n2, intro))
                 else:

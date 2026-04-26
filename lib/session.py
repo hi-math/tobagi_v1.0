@@ -2070,24 +2070,23 @@ class CollaborativeSession:
             return True
         return False
 
+    def get_stage_intro_message(self):
+        """현재 stage의 intro_message (시스템 정의 안내) 반환. 없으면 None.
+
+        gradio_app가 stage 진입 시 별도 시스템 버블로 띄울 용도.
+        학생 발화로는 사용하지 않는다.
+        """
+        stage = self.current_stage_info()
+        return stage.get("intro_message")
+
     def stage_intro_utterance(self, opener_key="ai_1"):
         # opener: 기본은 민준(ai_1). gradio_app에서는 Stage 2부터 서연(ai_2)을 명시 지정함.
         # 의도적으로 opener를 바꾸면 각 Stage 시작 지점에서 발화자가 다양해진다.
         persona = self.config["personas"]["ai_students"][opener_key]
         stage = self.current_stage_info()
 
-        # v1.39: stage에 intro_message가 있으면 그대로 학생 발화로 사용
-        # (Stage 2 진입 시 정의 안내처럼 명시적으로 보여줄 텍스트)
-        intro_msg = stage.get("intro_message")
-        if intro_msg:
-            text = intro_msg
-            print(f"       · [stage_intro] intro_message 직접 사용 ({len(text)}자)", flush=True)
-            self.conversation.append({
-                "speaker": persona["name"],
-                "content": text,
-                "stage": self.current_stage,
-            })
-            return text
+        # v1.42: intro_message는 학생 발화로 안 씀. gradio_app가 별도 시스템 버블로 띄움.
+        # (get_stage_intro_message()로 호출자에게 노출)
 
         prompt = render_prompt(self.prompts["stage_intro"], {
             "opener_name": persona["name"],
