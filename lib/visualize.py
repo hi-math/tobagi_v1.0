@@ -487,11 +487,14 @@ def checkpoint_markdown(config, learner_models):
                 prog = (learner_models.get(lk, {}).get("checkpoint_progress") or {}).get(s_key) or {}
                 cell = prog.get(cid)
                 if cell and cell.get("hit"):
-                    src = cell.get("source", "user")
+                    src = cell.get("source")
                     if src == "prior":
                         row.append(RED_CHECK)
-                    else:
+                    elif src in ("user", "observed", "learned"):
                         row.append(GREEN_CHECK)
+                    else:
+                        # source 누락/불명 → 안전하게 빈 칸 (LLM hallucination 흔적 차단)
+                        row.append("")
                 else:
                     row.append("")  # 미포착 → 빈 칸
             lines.append("| " + " | ".join(row) + " |")

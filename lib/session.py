@@ -1131,6 +1131,35 @@ class CollaborativeSession:
             hits.append("s1-3")
         return hits
 
+    def _verify_llm_hits(self, llm_hits, user_utterance, stage):
+        """LLM이 반환한 checkpoint_hits를 사용자 발화 detection_hints로 재검증.
+
+        v1.52: LLM이 AI 발화의 키워드를 사용자 hit으로 잘못 분류하는 hallucination
+        방지. 각 cp에 대해 detection_hints가 user_utterance에 fuzzy 매칭이
+        있어야만 인정. 매칭 안 되면 LLM hit 무시.
+
+        Returns: 검증 통과한 cp_id 리스트.
+        """
+        if not llm_hits or not user_utterance:
+            return []
+        cps_by_id = {cp.get("id"): cp for cp in (stage.get("checkpoints") or [])}
+        verified = []
+        rejected = []
+        for cid in llm_hits:
+            cp = cps_by_id.get(cid)
+            if not cp:
+                rejected.append((cid, "unknown_cp"))
+                continue
+            hints = cp.get("detection_hints") or []
+            if any(_fuzzy_match(h, user_utterance) for h in hints):
+                verified.append(cid)
+            else:
+                rejected.append((cid, "no_user_match"))
+        if rejected:
+            print(f"       · [llm-hit-verify] LLM이 잡았으나 사용자 발화 매칭 없음 → 무시: "
+                  f"{rejected}", flush=True)
+        return verified
+
     def _next_missing_required(self, stage_num=None):
         """현재 Stage에서 사용자 미달성 필수(prio=필수) 체크포인트 첫 번째 반환.
 
@@ -1843,6 +1872,8 @@ class CollaborativeSession:
         if isinstance(llm_hits_early, str):
             llm_hits_early = [llm_hits_early]
         llm_hits_early = [str(h).strip() for h in llm_hits_early if h]
+        # v1.52: LLM이 AI 발화 키워드를 사용자 hit으로 잘못 분류하는 hallucination 방지
+        llm_hits_early = self._verify_llm_hits(llm_hits_early, user_utterance, stage)
         keyword_hits_early = self._keyword_match_checkpoints(user_utterance, stage)
         # 일반화 검증 hits — 누적 사례 기반 s1-2/s1-3 추가 hit
         gen_hits_early = self._check_generalization_via_examples()
