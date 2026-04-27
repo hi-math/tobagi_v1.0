@@ -279,6 +279,14 @@ def _hint_to_fuzzy_regex(hint):
     return r"\s*".join(out_parts)
 
 
+def _safe_re_search(pattern, text):
+    """re.search 안전 래퍼 — 잘못된 정규식 패턴 방어."""
+    try:
+        return bool(re.search(pattern, text))
+    except re.error:
+        return False
+
+
 def _fuzzy_match(hint, text):
     """hint를 fuzzy 정규식으로 변환해 text에서 매칭 시도.
 
@@ -1132,17 +1140,36 @@ class CollaborativeSession:
         return hits
 
     def _verify_llm_hits(self, llm_hits, user_utterance, stage):
-        """LLM이 반환한 checkpoint_hits를 사용자 발화 detection_hints로 재검증.
+        """LLM이 반환한 checkpoint_hits를 검증 (v1.57 — 맥락 결합 검증 추가).
 
-        v1.52: LLM이 AI 발화의 키워드를 사용자 hit으로 잘못 분류하는 hallucination
-        방지. 각 cp에 대해 detection_hints가 user_utterance에 fuzzy 매칭이
-        있어야만 인정. 매칭 안 되면 LLM hit 무시.
+        검증 경로 (둘 중 하나라도 통과하면 인정):
+          (1) 사용자 발화 단독에 detection_hints/patterns 매칭 (보수적, 기본)
+          (2) 사용자 발화 + 직전 AI 발화 합산 매칭 + 사용자가 짧은 긍정 OR 숫자 발화 (맥락)
 
-        Returns: 검증 통과한 cp_id 리스트.
+        예시:
+          AI "23 소수 맞아?" + 사용자 "응" → 맥락 인정
+          AI "20~30 중 소수?" + 사용자 "23이지" → 맥락 인정 (사용자가 숫자 지목)
         """
         if not llm_hits or not user_utterance:
             return []
         cps_by_id = {cp.get("id"): cp for cp in (stage.get("checkpoints") or [])}
+
+        # 직전 AI 발화 (맥락 검증용)
+        last_ai_text = ""
+        for m in reversed(self.conversation[-5:]):
+            if m.get("agent_id") and m.get("content"):
+                last_ai_text = m["content"]
+                break
+
+        # 사용자 짧은 긍정 신호 (응, 맞, 그치, ㅇㅇ 등)
+        user_stripped = user_utterance.strip()
+        user_affirm = bool(re.match(
+            r"^(응|네|맞|그래|그치|그렇|좋|ㅇㅇ|어\s*맞|예|네에)",
+            user_stripped[:8]
+        ))
+        # 사용자가 숫자 지목 (예: "23", "23, 29")
+        user_has_number = bool(re.search(r"\d", user_utterance))
+
         verified = []
         rejected = []
         for cid in llm_hits:
@@ -1151,13 +1178,34 @@ class CollaborativeSession:
                 rejected.append((cid, "unknown_cp"))
                 continue
             hints = cp.get("detection_hints") or []
-            if any(_fuzzy_match(h, user_utterance) for h in hints):
+            patterns = cp.get("detection_patterns") or []
+
+            # (1) 사용자 단독 매칭
+            user_match = (
+                any(_fuzzy_match(h, user_utterance) for h in hints) or
+                any(_safe_re_search(p, user_utterance) for p in patterns)
+            )
+            if user_match:
                 verified.append(cid)
-            else:
-                rejected.append((cid, "no_user_match"))
+                continue
+
+            # (2) 맥락 결합 검증
+            if last_ai_text:
+                ai_has_cp = (
+                    any(_fuzzy_match(h, last_ai_text) for h in hints) or
+                    any(_safe_re_search(p, last_ai_text) for p in patterns)
+                )
+                if ai_has_cp and (user_affirm or user_has_number):
+                    verified.append(cid)
+                    print(f"       · [llm-hit-verify] {cid} 맥락 인정 "
+                          f"(AI 직전 발화 + 사용자 긍정/숫자)", flush=True)
+                    continue
+
+            rejected.append((cid, "no_match"))
+
         if rejected:
-            print(f"       · [llm-hit-verify] LLM이 잡았으나 사용자 발화 매칭 없음 → 무시: "
-                  f"{rejected}", flush=True)
+            print(f"       · [llm-hit-verify] 매칭 실패 → 무시: {rejected}",
+                  flush=True)
         return verified
 
     def _next_missing_required(self, stage_num=None):
@@ -2311,6 +2359,58 @@ class CollaborativeSession:
             print(sep)
 
         return result
+
+    def dump_stage_state(self):
+        """Stage 진행 상태를 진단용으로 dump.
+
+        Colab thread print가 안 보이는 환경에서 사용자가 새 셀에 직접 호출:
+            ctx['config']['_session'].dump_stage_state()
+        """
+        import json
+        stage = self.current_stage_info()
+        sk = str(self.current_stage)
+        user_prog = (
+            (self.learner_models.get("user", {}).get("checkpoint_progress") or {})
+            .get(sk) or {}
+        )
+        required = stage.get("stage_complete_required") or []
+        hit_ids = sorted(cid for cid, v in user_prog.items()
+                          if isinstance(v, dict) and v.get("hit"))
+        missing = [cid for cid in required if cid not in hit_ids]
+
+        print(f"== current_stage: {self.current_stage} ==")
+        print(f"   turn_count: {self.turn_count}")
+        print(f"   pending_stage_complete: {self.pending_stage_complete}")
+        print(f"   pending_since_turn: {self.pending_stage_complete_since_turn}")
+        print(f"   stage_complete_required: {required}")
+        print(f"   hit_ids: {hit_ids}")
+        print(f"   missing: {missing}")
+        print()
+        print("== last_tutor_decision ==")
+        last = getattr(self, "last_tutor_decision", None) or {}
+        print(json.dumps(last, ensure_ascii=False, indent=2)[:2000])
+        print()
+        print("== conversation 마지막 6개 ==")
+        for m in self.conversation[-6:]:
+            spk = m.get("speaker", "")
+            content = (m.get("content") or "")[:100]
+            print(f"   [{spk}] {content}")
+        print()
+        print("== stage 1 completion_quiz 정의 ==")
+        quiz = stage.get("completion_quiz")
+        if quiz:
+            print(f"   question: {quiz.get('question', '')[:80]}")
+            print(f"   correct keywords: {len(quiz.get('correct_answers_keywords', []))}개")
+        else:
+            print("   (없음 — legacy consent 방식)")
+        return {
+            "stage": self.current_stage,
+            "pending_stage_complete": self.pending_stage_complete,
+            "required": required,
+            "hit_ids": hit_ids,
+            "missing": missing,
+            "last_decision": last,
+        }
 
     def get_stage_intro_message(self):
         """현재 stage의 intro_message (시스템 정의 안내) 반환. 없으면 None.

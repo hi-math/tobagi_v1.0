@@ -32,6 +32,9 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
         print(f"       · [launch_ui] reset=True → learner_models 초기화 완료", flush=True)
 
     session = CollaborativeSession(config, prompts, learner_models, api)
+    # v1.56: 외부 진단용으로 session을 config dict에 노출
+    # (Colab thread print 안 보이는 환경에서 사용자가 직접 dump 가능)
+    config["_session"] = session
 
     _streaming_flag = [False]
     n1 = config["personas"]["ai_students"]["ai_1"]["name"]
