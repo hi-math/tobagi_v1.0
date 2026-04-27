@@ -2078,6 +2078,97 @@ class CollaborativeSession:
             return True
         return False
 
+    def inspect_ai_turn(self, user_utterance, agent_id="ai_1",
+                        run_analyze=True, dump=True):
+        """디버그용: 발화 1회의 prompt와 LLM raw 응답을 dict로 반환 + 출력.
+
+        사용 예시 (Colab):
+            from lib import CollaborativeSession
+            s = CollaborativeSession(ctx['config'], ctx['prompts'],
+                                      ctx['learner_models'], ctx['api'])
+            r = s.inspect_ai_turn("소수가 뭐야?", agent_id="ai_1")
+            # dump=True면 자동 출력. False면 r['prompt'], r['raw'] 직접 확인.
+
+        Args:
+            user_utterance: 시뮬할 사용자 발화
+            agent_id: 분석할 AI ("ai_1"=민준, "ai_2"=서연, "ai_3"=연우)
+            run_analyze: True면 analyze_and_decide LLM 호출 (directive 생성).
+                         False면 빈 directive로 발화만.
+            dump: True면 콘솔에 보기 좋게 출력.
+
+        Returns:
+            dict {
+                user_utterance, agent_id,
+                analysis, decision_strategy, decision_speakers, directive,
+                prompt, prompt_len,
+                raw, raw_len,
+                sanitized,
+            }
+        """
+        analysis = None
+        decision = {}
+        directive = {}
+
+        if run_analyze:
+            try:
+                prep = self.user_turn_prep(user_utterance)
+                analysis = prep.get("analysis")
+                decision = prep.get("decision") or {}
+                directive = decision.get(f"{agent_id}_directive") or {}
+            except Exception as e:
+                print(f"[inspect] analyze 실패: {e}", flush=True)
+
+        # AI 발화 prompt 빌드
+        prompt = self._build_ai_prompt(
+            agent_id, directive, user_utterance,
+            user_mode=self.current_user_mode,
+        )
+
+        # LLM 호출 (non-stream, 발화와 동일한 파라미터)
+        try:
+            raw = self.api.call(prompt, max_tokens=500, temperature=1.0)
+        except Exception as e:
+            raw = f"(LLM 호출 실패: {e})"
+
+        sanitized = sanitize_ai_output(raw)
+
+        result = {
+            "user_utterance": user_utterance,
+            "agent_id": agent_id,
+            "analysis": analysis,
+            "decision_strategy": decision.get("strategy"),
+            "decision_speakers": decision.get("speaking_agents"),
+            "directive": directive,
+            "prompt": prompt,
+            "prompt_len": len(prompt),
+            "raw": raw,
+            "raw_len": len(raw or ""),
+            "sanitized": sanitized,
+        }
+
+        if dump:
+            sep = "=" * 70
+            print(sep)
+            print(f"[inspect_ai_turn] agent={agent_id}  user_utt={user_utterance!r}")
+            print(sep)
+            print(f"DECISION  strategy={result['decision_strategy']!r}  "
+                  f"speakers={result['decision_speakers']}")
+            print(f"DIRECTIVE:")
+            for k, v in (directive or {}).items():
+                print(f"  {k}: {v}")
+            print(sep)
+            print(f"PROMPT ({result['prompt_len']}자) — LLM에 보낸 내용:")
+            print(prompt)
+            print(sep)
+            print(f"RAW LLM RESPONSE ({result['raw_len']}자):")
+            print(raw)
+            print(sep)
+            print(f"SANITIZED (사용자에게 보일 발화):")
+            print(sanitized)
+            print(sep)
+
+        return result
+
     def get_stage_intro_message(self):
         """현재 stage의 intro_message (시스템 정의 안내) 반환. 없으면 None.
 
