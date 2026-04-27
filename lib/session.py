@@ -1241,24 +1241,24 @@ class CollaborativeSession:
                 verified.append(cid)
                 continue
 
-            # (2) 맥락 결합 검증
-            if last_ai_text:
+            # (2) 맥락 결합 검증 (v1.68 강화 — 짧은 긍정 단독 거부, 숫자만 인정)
+            if last_ai_text and user_has_number:
                 ai_has_cp = (
                     any(_fuzzy_match(h, last_ai_text) for h in hints) or
                     any(_safe_re_search(p, last_ai_text) for p in patterns)
                 )
-                if ai_has_cp and (user_affirm or user_has_number):
+                if ai_has_cp:
                     verified.append(cid)
                     print(f"       · [llm-hit-verify] {cid} 맥락 인정 "
-                          f"(AI 직전 발화 + 사용자 긍정/숫자)", flush=True)
+                          f"(AI 직전 발화 + 사용자 숫자)", flush=True)
                     continue
 
-            # (3) v1.62: 의미 토큰 매칭 — 사용자 발화에 cp 핵심 토큰 ≥1개 + 발화 길이 ≥8자
-            # 새 변형 표현이 detection_patterns에 없어도 LLM 판정 + 토큰 일치면 인정.
-            if len(user_utterance.strip()) >= 8:
+            # (3) v1.68 토큰 매칭 강화: 길이 ≥12자 + 토큰 ≥2개
+            # (v1.62: 8자/1개 → over-permissive. 강화로 stage clear 너무 빠른 문제 완화)
+            if len(user_utterance.strip()) >= 12:
                 cp_tokens = self._extract_cp_tokens(cp)
                 matched_toks = [tok for tok in cp_tokens if tok in user_utterance]
-                if len(matched_toks) >= 1:
+                if len(matched_toks) >= 2:
                     verified.append(cid)
                     print(f"       · [llm-hit-verify] {cid} 토큰 인정 "
                           f"(matched={matched_toks[:5]})", flush=True)
