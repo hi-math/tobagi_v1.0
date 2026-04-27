@@ -16,8 +16,20 @@ from .visualize import (
 )
 
 
-def launch_ui(*, config, prompts, learner_models, api, share=True):
+def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
+    """v1.53: reset=True (기본값) 시 launch마다 learner_models·conversation 초기화.
+    이전 세션 누적으로 user 컬럼에 잘못된 hit이 남는 문제 방지.
+    이전 진척을 이어받으려면 reset=False로 호출.
+    """
     import gradio as gr
+
+    if reset:
+        from .learner_model import init_learners as _init_learners
+        # ctx의 learner_models dict를 새 결과로 in-place 갱신 (외부 ctx도 동기화)
+        fresh = _init_learners(config)
+        learner_models.clear()
+        learner_models.update(fresh)
+        print(f"       · [launch_ui] reset=True → learner_models 초기화 완료", flush=True)
 
     session = CollaborativeSession(config, prompts, learner_models, api)
 
