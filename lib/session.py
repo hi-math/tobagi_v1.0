@@ -494,6 +494,10 @@ class CollaborativeSession:
         self.pending_stage_complete = False
         self.pending_stage_complete_since_turn = None
 
+        # v1.73: 모든 Stage 완료 플래그 — UI 마무리 카드 트리거용.
+        # advance_stage()가 더 진행할 stage 없어 False 반환 시점에 True로 셋.
+        self.all_stages_complete = False
+
     def recent_dialogue(self, n=6):
         recent = self.conversation[-n:]
         return "\n".join(f"[{m['speaker']}]: {m['content']}" for m in recent) or "(아직 대화 없음)"
@@ -2353,7 +2357,77 @@ class CollaborativeSession:
             self.current_stage += 1
             self.stage_turn_count = 0
             return True
+        # 더 진행할 stage 없음 — 전체 완료 플래그 셋 (UI 마무리 카드 트리거).
+        self.all_stages_complete = True
         return False
+
+    def get_completion_messages(self):
+        """모든 stage가 끝난 뒤 마지막에 노출할 AI 학생 마무리 발화 리스트 (정적).
+
+        Returns:
+            list of {"agent_id": str, "text": str}.
+            tasks.json 의 "completion_messages" 필드를 그대로 반환.
+            LLM 호출 실패 시의 fallback. 평상시에는 generate_completion_messages_llm() 사용.
+        """
+        return list(self.task.get("completion_messages") or [])
+
+    def generate_completion_messages_llm(self):
+        """LLM으로 3인의 개인화된 마무리 발화 생성. 사용자가 좋은 설명을 했으면 인용·칭찬.
+
+        실패 시(JSON 파싱 실패, API 에러 등) 정적 fallback (`get_completion_messages`)로 폴백.
+
+        Returns:
+            list of {"agent_id": str, "text": str} (길이 3, ai_1·ai_2·ai_3 순서)
+        """
+        try:
+            personas = self.config["personas"]["ai_students"]
+            user_persona = self.config["personas"].get("user", {}) or {}
+            user_name = user_persona.get("name") or "사용자"
+
+            # 전체 대화 내역 (최근 60턴까지 — 보통 3 stage 합쳐 50턴 안팎)
+            recent = self.conversation[-60:] if self.conversation else []
+            full_dialogue = "\n".join(
+                f"[{turn.get('speaker', '?')}]: {turn.get('content', '')}"
+                for turn in recent
+            ) or "(대화 내역 없음)"
+
+            # 사용자가 도달한 cp — checkpoint_progress에서 hit=True인 항목만 추출
+            user_prog_all = (
+                self.learner_models.get("user", {}).get("checkpoint_progress") or {}
+            )
+            hit_lines = []
+            for stage_key, stage in self.task.get("stages", {}).items():
+                stage_prog = user_prog_all.get(str(stage_key)) or {}
+                for cp in stage.get("checkpoints") or []:
+                    cid = cp.get("id", "")
+                    if stage_prog.get(cid, {}).get("hit"):
+                        hit_lines.append(f"  - [{cid}] {cp.get('knowledge', '')}")
+            user_hit_text = "\n".join(hit_lines) if hit_lines else "  (특별히 hit된 항목 없음 — 일반 칭찬으로 대체)"
+
+            prompt = render_prompt(self.prompts["completion_summary"], {
+                "user_name": user_name,
+                "full_dialogue": full_dialogue,
+                "user_hit_checkpoints": user_hit_text,
+            })
+
+            raw = self.api.call(prompt, max_tokens=600, temperature=0.8)
+            print(f"       · [completion_llm raw len={len(raw)}] {raw[:160]!r}...", flush=True)
+
+            data = extract_json(raw) or {}
+            keys_ok = all(isinstance(data.get(k), str) and data[k].strip()
+                          for k in ("ai_1", "ai_2", "ai_3"))
+            if not keys_ok:
+                print("       · [completion_llm] JSON 파싱/키 누락 — 정적 fallback", flush=True)
+                return self.get_completion_messages()
+
+            return [
+                {"agent_id": "ai_1", "text": data["ai_1"].strip()},
+                {"agent_id": "ai_2", "text": data["ai_2"].strip()},
+                {"agent_id": "ai_3", "text": data["ai_3"].strip()},
+            ]
+        except Exception as e:
+            print(f"       · [completion_llm] 호출 실패: {e!r} — 정적 fallback", flush=True)
+            return self.get_completion_messages()
 
     def inspect_ai_turn(self, user_utterance, agent_id="ai_1",
                         run_analyze=True, dump=True):

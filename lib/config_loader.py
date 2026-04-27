@@ -42,6 +42,7 @@ def load_config(base_path="team4", domain_folder="domain", max_domain_chars=8000
         "encouragement":      load_md(base / "prompts" / "07_encouragement.md"),
         "cps_tagging":        load_md(base / "prompts" / "08_cps_tagging.md"),
         "self_efficacy":      load_md(base / "prompts" / "09_self_efficacy_survey.md"),
+        "completion_summary": load_md(base / "prompts" / "10_completion_summary.md"),
     }
 
     return config, prompts
