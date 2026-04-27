@@ -851,14 +851,14 @@ class CollaborativeSession:
         decision["speaking_agents"] = [addressed]
 
     def _check_quiz_answer(self, user_utterance, quiz):
-        """completion_quiz의 사용자 답변을 엄격 검증 (v1.51).
+        """completion_quiz의 사용자 답변 검증 (v1.63 — strict 숫자 체크 제거).
 
-        강화 룰:
-          - quiz question에서 핵심 숫자를 추출 (예: 21).
-          - 사용자 답에 그 숫자가 등장해야 정답·오답 판정 시작.
-          - 숫자 없이 단순 '오른쪽'/'합성수' 단독 발화는 unclear (서연이 다시 묻기).
-          - 정답 키워드 매칭 → correct
-          - 오답 키워드 매칭 → incorrect
+        pending_stage_complete=True일 때만 호출되므로 맥락이 명확.
+        wrong > correct > short_correct 우선순위:
+          1. wrong_keywords 매칭 → incorrect
+          2. correct_answers_keywords 매칭 → correct
+          3. 짧은 분류어 ('오른쪽'/'합성수' 등) 매칭 + wrong 없음 → correct
+          4. 그 외 → unclear (서연이 다시 묻기)
 
         반환: 'correct' | 'incorrect' | 'unclear'
         """
@@ -866,24 +866,37 @@ class CollaborativeSession:
             return "unclear"
         text = user_utterance
 
-        # quiz 질문에서 핵심 숫자 추출
-        question = quiz.get("question") or ""
-        nums = re.findall(r"\d+", question)
-        target_num = nums[0] if nums else None
-
-        # 사용자 답에 핵심 숫자 없으면 unclear (단편 발화 차단)
-        if target_num and target_num not in text:
-            return "unclear"
-
         wrong_keys = quiz.get("wrong_keywords") or []
         right_keys = quiz.get("correct_answers_keywords") or []
 
-        right_hit = any(k in text for k in right_keys)
         wrong_hit = any(k in text for k in wrong_keys)
+        right_hit = any(k in text for k in right_keys)
 
+        # 1. wrong 우선 — 사용자가 명백히 오답 ("21은 왼쪽" 등)
+        if wrong_hit and not right_hit:
+            return "incorrect"
+        # 2. correct 명시 매칭 (21 결합형)
         if right_hit:
             return "correct"
-        if wrong_hit:
+        # 3. short_correct fallback — 짧은 분류어로 답한 경우 (예: "오른쪽, 합성수이니까")
+        # quiz의 wrong_keys에서 분류어 추출 vs correct에서 분류어 추출
+        # Stage 1 quiz의 경우: 정답=오른쪽/합성수, 오답=왼쪽/소수
+        short_correct_terms = []
+        short_wrong_terms = []
+        for k in right_keys:
+            for term in ("오른쪽", "합성수", "오답이 아닌"):
+                if term in k and term not in short_correct_terms:
+                    short_correct_terms.append(term)
+        for k in wrong_keys:
+            for term in ("왼쪽", "소수"):
+                if term in k and term not in short_wrong_terms:
+                    short_wrong_terms.append(term)
+        short_corr_present = any(t in text for t in short_correct_terms)
+        short_wrong_present = any(t in text for t in short_wrong_terms)
+        # 짧은 분류어로 답한 경우
+        if short_corr_present and not short_wrong_present:
+            return "correct"
+        if short_wrong_present and not short_corr_present:
             return "incorrect"
         return "unclear"
 
@@ -936,15 +949,16 @@ class CollaborativeSession:
                 }
             else:  # unclear
                 held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
-                if held_turns >= 3:
-                    print(f"       · [stage-gate] pending 3턴 경과 → 해제, Stage 유지", flush=True)
+                # v1.64: 2번 물어본 후에는 답 불명확해도 강제 통과 (학습 흐름 막지 않기)
+                if held_turns >= 2:
+                    print(f"       · [stage-gate] pending {held_turns}턴 경과 — quiz 답 불명확하지만 강제 통과", flush=True)
+                    decision["stage_complete"] = True
                     self.pending_stage_complete = False
                     self.pending_stage_complete_since_turn = None
-                decision["stage_complete"] = False
-                # v1.59: pending 유지 turn에도 서연이 quiz 다시 출제하도록 directive 재주입
-                # (이전 버그: 매 turn 새 analyze LLM이 directive 덮어써 quiz 사라짐)
-                if self.pending_stage_complete:
-                    print(f"       · [stage-gate] pending 유지 — 서연 quiz 재출제 directive 주입", flush=True)
+                else:
+                    # 1번째 unclear: 한 번 더 묻기 (서연 quiz 재출제 directive 주입)
+                    print(f"       · [stage-gate] pending 유지 (held={held_turns}) — 서연 quiz 재출제", flush=True)
+                    decision["stage_complete"] = False
                     decision["speaking_agents"] = ["ai_2"]
                     decision["ai_1_directive"] = None
                     decision["ai_3_directive"] = None
@@ -1155,6 +1169,28 @@ class CollaborativeSession:
             hits.append("s1-3")
         return hits
 
+    def _extract_cp_tokens(self, cp):
+        """cp의 detection_hints에서 핵심 토큰 set 추출 (단어 단위, 조사 제거).
+
+        v1.62: 사용자 발화 의미 토큰 매칭용. 새로운 변형 표현이 detection_patterns에
+        없어도 토큰 1개 + LLM hit 판정이면 인정 (일반화 fallback).
+
+        예: s1-2 hints 중 '소수는 약수가 2개' → tokens: {'소수', '약수가', '2개', '2'}
+        """
+        hints = cp.get("detection_hints") or []
+        tokens = set()
+        for h in hints:
+            for w in h.split():
+                w_clean = w.rstrip("은는이가을를과와의로만뿐도")
+                if len(w_clean) >= 2:
+                    tokens.add(w_clean)
+                # 숫자도 토큰화
+                for nm in re.finditer(r"\d+", w):
+                    tokens.add(nm.group())
+        # 너무 흔한 토큰 제거 (false positive 방지)
+        common = {"수", "수가", "수는", "거", "것", "이", "그"}
+        return tokens - common
+
     def _verify_llm_hits(self, llm_hits, user_utterance, stage):
         """LLM이 반환한 checkpoint_hits를 검증 (v1.57 — 맥락 결합 검증 추가).
 
@@ -1215,6 +1251,17 @@ class CollaborativeSession:
                     verified.append(cid)
                     print(f"       · [llm-hit-verify] {cid} 맥락 인정 "
                           f"(AI 직전 발화 + 사용자 긍정/숫자)", flush=True)
+                    continue
+
+            # (3) v1.62: 의미 토큰 매칭 — 사용자 발화에 cp 핵심 토큰 ≥1개 + 발화 길이 ≥8자
+            # 새 변형 표현이 detection_patterns에 없어도 LLM 판정 + 토큰 일치면 인정.
+            if len(user_utterance.strip()) >= 8:
+                cp_tokens = self._extract_cp_tokens(cp)
+                matched_toks = [tok for tok in cp_tokens if tok in user_utterance]
+                if len(matched_toks) >= 1:
+                    verified.append(cid)
+                    print(f"       · [llm-hit-verify] {cid} 토큰 인정 "
+                          f"(matched={matched_toks[:5]})", flush=True)
                     continue
 
             rejected.append((cid, "no_match"))
