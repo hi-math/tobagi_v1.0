@@ -22,8 +22,9 @@
     "1": {
       "stage_id": 1,
       "title": "Stage 1 — 분류 기준 발견하기",
-      "core_question": "왼쪽 수들과 오른쪽 수들을 어떤 기준으로 분류한 걸까?",
+      "core_question": "",
       "prompt": "다음은 2부터 20까지의 수를 어떤 규칙에 맞춰서 분류한 것입니다. 수를 분류한 기준이 무엇일까요?\n\n왼쪽: 2, 3, 5, 7, 11, 13, 17, 19\n오른쪽: 4, 6, 8, 9, 10, 12, 14, 15, 16, 18, 20",
+      "prompt_html": "다음은 2부터 20까지의 수를 어떤 규칙에 맞춰서 분류한 것입니다. 수를 분류한 기준이 무엇일까요?<br><br><table style=\"border-collapse:collapse; margin:6px 0; font-size:1.0em;\"><thead><tr><th style=\"border:1px solid #4338ca; padding:8px 18px; background:#c7d2fe; color:#1e1b4b; font-weight:700;\">왼쪽</th><th style=\"border:1px solid #4338ca; padding:8px 18px; background:#c7d2fe; color:#1e1b4b; font-weight:700;\">오른쪽</th></tr></thead><tbody><tr><td style=\"border:1px solid #4338ca; padding:8px 18px; background:#ffffff; color:#1e1b4b;\">2, 3, 5, 7, 11, 13, 17, 19</td><td style=\"border:1px solid #4338ca; padding:8px 18px; background:#ffffff; color:#1e1b4b;\">4, 6, 8, 9, 10, 12, 14, 15, 16, 18, 20</td></tr></tbody></table>",
       "key_concepts": [
         "분류 기준 발견",
         "약수 개수의 차이",

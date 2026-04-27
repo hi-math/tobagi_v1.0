@@ -84,7 +84,9 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
         accent = "#4f46e5"
         accent_dark = "#4338ca"
         body_bg = "#eef2ff"
-        prompt_html = prompt.replace("\n", "<br>")
+        # prompt_html 필드가 있으면 그것을 그대로 사용 (테이블 등 HTML 그대로 표시).
+        # 없으면 plain prompt 의 \n 을 <br> 로 변환.
+        prompt_html = stage_info.get("prompt_html") or prompt.replace("\n", "<br>")
         core_q_html = core_q.replace("\n", "<br>")
         return (
             f'<div style="border:2px solid {accent}; border-radius:10px; '
