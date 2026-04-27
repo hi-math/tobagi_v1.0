@@ -436,22 +436,25 @@ def user_model_markdown(config, learner_models):
 # --------------------------------------------------------------------
 
 def checkpoint_markdown(config, learner_models):
-    """Stage별 체크포인트 진행도를 테이블로 출력. user + 3 AI 나란히.
+    """Stage별 체크포인트 진행도 테이블. user + 3 AI 나란히 (v1.49 단순화).
 
-    사용자 발화에서 각 체크포인트가 포착되는지, AI 학생에게 전파되는지를
-    한눈에 볼 수 있게 표시. 학습자 모델 패널과 분리된 별도 탭으로 제공.
+    표시 규칙:
+      - 미포착 (hit=False) → 빈 칸
+      - 사전지식 (hit=True, source='prior') → 빨간 체크
+      - 포착 (hit=True, source!='prior') → 녹색 체크
+      - 우선순위(필수/권장/보너스) 표식 없음
+      - 사용자 진척 요약 섹션 없음
     """
     tasks = config.get("tasks") or {}
     stages = tasks.get("stages") or {}
 
-    PRIORITY_EMOJI = {"필수": "🔴", "권장": "🟡", "보너스": "🟢"}
-    SOURCE_EMOJI = {"user": "✅", "prior": "📚", "observed": "👁", "learned": "💡"}
+    GREEN_CHECK = '<span style="color:#22c55e;font-weight:bold;">✓</span>'
+    RED_CHECK = '<span style="color:#ef4444;font-weight:bold;">✓</span>'
 
     lines = [
         "### 🎯 지식 체크포인트 진행도",
         "",
-        "_Stage별 학습자 발화에서 포착돼야 할 지식 단위. "
-        "사용자와 AI 학생 각각의 이해 상태를 나란히 비교해서 보여줍니다._",
+        "_Stage별 학습자가 발화로 포착해야 할 지식 단위._",
     ]
 
     # 사용자 + 3 AI 순서
@@ -463,31 +466,7 @@ def checkpoint_markdown(config, learner_models):
             name = learner_models[aid].get("student_name", aid)
             learner_order.append((aid, name))
 
-    # Stage별 집계 요약 (상단 스냅샷)
-    lines.append("\n#### 📊 Stage별 사용자 진척 요약")
-    summary_rows = []
-    for s_key in sorted(stages.keys(), key=lambda x: int(x) if str(x).isdigit() else 99):
-        stage = stages[s_key]
-        cps = stage.get("checkpoints") or []
-        if not cps:
-            continue
-        user_prog = (learner_models.get("user", {}).get("checkpoint_progress") or {}).get(s_key) or {}
-        total = len(cps)
-        필수 = sum(1 for cp in cps if cp.get("priority") == "필수")
-        hit_총 = sum(1 for cp in cps if user_prog.get(cp.get("id"), {}).get("hit"))
-        hit_필수 = sum(1 for cp in cps
-                    if cp.get("priority") == "필수"
-                    and user_prog.get(cp.get("id"), {}).get("hit"))
-        bar_total = "█" * hit_총 + "░" * (total - hit_총)
-        bar_req = "█" * hit_필수 + "░" * (필수 - hit_필수) if 필수 else "—"
-        summary_rows.append(
-            f"- **Stage {s_key}** · {stage.get('title', '')[:30]}"
-            f"\n    - 필수: `[{bar_req}]` {hit_필수}/{필수}"
-            f"\n    - 전체: `[{bar_total}]` {hit_총}/{total}"
-        )
-    lines.extend(summary_rows)
-
-    # 각 Stage별 상세 테이블
+    # 각 Stage별 상세 테이블만 표시 (요약 섹션 삭제)
     for s_key in sorted(stages.keys(), key=lambda x: int(x) if str(x).isdigit() else 99):
         stage = stages[s_key]
         cps = stage.get("checkpoints") or []
@@ -502,25 +481,24 @@ def checkpoint_markdown(config, learner_models):
 
         for cp in cps:
             cid = cp.get("id", "")
-            prio = cp.get("priority", "")
             know = cp.get("knowledge", "")
-            prio_e = PRIORITY_EMOJI.get(prio, "⚪")
-            row = [f"{prio_e} `{cid}` {know}"]
+            row = [f"`{cid}` {know}"]
             for lk, _name in learner_order:
                 prog = (learner_models.get(lk, {}).get("checkpoint_progress") or {}).get(s_key) or {}
                 cell = prog.get(cid)
                 if cell and cell.get("hit"):
                     src = cell.get("source", "user")
-                    emo = SOURCE_EMOJI.get(src, "✅")
-                    row.append(emo)
+                    if src == "prior":
+                        row.append(RED_CHECK)
+                    else:
+                        row.append(GREEN_CHECK)
                 else:
-                    row.append("⬜")
+                    row.append("")  # 미포착 → 빈 칸
             lines.append("| " + " | ".join(row) + " |")
 
     lines.append(
-        "\n> **범례** — 우선순위: 🔴필수 · 🟡권장 · 🟢보너스 | "
-        "상태: ✅사용자 발화로 포착 · 📚사전지식 · 👁관찰 학습(즉시) · "
-        "💡반복 관찰로 학습 · ⬜미포착"
+        f"\n> **범례** — {RED_CHECK} 사전지식 · {GREEN_CHECK} 대화로 포착 · "
+        "(빈 칸) 미포착"
     )
     return "\n".join(lines)
 

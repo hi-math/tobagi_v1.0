@@ -832,41 +832,128 @@ class CollaborativeSession:
                 decision[f"{other}_directive"] = None
         decision["speaking_agents"] = [addressed]
 
-    def _apply_stage_gate(self, decision, user_utterance):
-        """Stage 완료 2단계 게이트: 조건 충족 → 서연 확인 질문 → 사용자 승인.
+    def _check_quiz_answer(self, user_utterance, quiz):
+        """completion_quiz의 사용자 답변을 검증.
 
-        - pending 상태에서 사용자가 consent면 실제 advance, reject면 pending 해제
-        - 조건이 이번 턴에 처음 충족되면 pending으로 전환하고 서연 단독 확인 질문 directive 주입
-        - pending 2턴 경과하면 자동 해제 (stuck 방지)
-
-        main flow·fallback 양쪽에서 호출되어야 함.
+        - 정답 키워드 매칭 + 오답 키워드 우선순위 → ('correct'|'incorrect'|'unclear')
+        - 오답 키워드가 정답 키워드보다 강하게 매칭되면 incorrect (예: "왼쪽" 단독)
         """
+        if not user_utterance or not quiz:
+            return "unclear"
+        text = user_utterance
+        wrong_keys = quiz.get("wrong_keywords") or []
+        right_keys = quiz.get("correct_answers_keywords") or []
+
+        wrong_hit = any(k in text for k in wrong_keys)
+        right_hit = any(k in text for k in right_keys)
+
+        # 둘 다 hit하면 정답 키워드(더 구체적) 우선 (예: "오른쪽인데 합성수")
+        if right_hit:
+            return "correct"
+        if wrong_hit:
+            return "incorrect"
+        return "unclear"
+
+    def _apply_stage_gate(self, decision, user_utterance):
+        """Stage 완료 2단계 게이트: 조건 충족 → 서연 스몰 퀴즈 → 정답 시 advance.
+
+        v1.48: '동의 묻기'에서 '스몰 퀴즈 정답 검증'으로 변경.
+        - pending 상태에서 사용자 답변을 quiz와 매칭
+          - correct → advance
+          - incorrect → "다시 생각해봐" 힌트 directive + pending 유지
+          - unclear → pending 유지 (서연이 다시 묻기)
+        - 조건 충족 첫 턴에 서연 단독 발화로 quiz 출제 directive 주입
+        - pending 3턴 경과하면 자동 해제 (stuck 방지)
+
+        Stage에 completion_quiz가 없으면 종래 consent 방식으로 fallback.
+        """
+        stage = self.current_stage_info()
+        quiz = stage.get("completion_quiz")
+
+        # quiz 없는 stage: 종래 consent 방식
+        if not quiz:
+            self._apply_stage_gate_consent_legacy(decision, user_utterance)
+            return
+
+        if self.pending_stage_complete:
+            verdict = self._check_quiz_answer(user_utterance, quiz)
+            print(f"       · [stage-gate quiz] verdict={verdict} "
+                  f"answer={user_utterance[:60]!r}", flush=True)
+            if verdict == "correct":
+                print(f"       · [stage-gate] 퀴즈 정답 → stage_complete=True 확정", flush=True)
+                decision["stage_complete"] = True
+                self.pending_stage_complete = False
+                self.pending_stage_complete_since_turn = None
+            elif verdict == "incorrect":
+                print(f"       · [stage-gate] 퀴즈 오답 → 서연이 힌트 후 재시도 유도", flush=True)
+                decision["stage_complete"] = False
+                # 서연이 짧은 힌트 + 재질문
+                decision["speaking_agents"] = ["ai_2"]
+                decision["ai_1_directive"] = None
+                decision["ai_3_directive"] = None
+                decision["ai_2_directive"] = {
+                    "role": "진행자 (퀴즈 오답 → 힌트 후 재시도)",
+                    "speech_goal": (
+                        f"사용자가 퀴즈 답을 틀렸다 (정답은 '{quiz.get('correct_answer','')}'). "
+                        f"바로 답을 알려주지 말고 약수를 같이 세어보자고 부드럽게 유도. "
+                        f"예: '음, 21을 한 번 나눠볼까? 21은 어떤 수로 나눠지지?'"
+                    ),
+                    "must_include": "약수를 같이 세어보자는 짧은 유도 + 다시 분류 질문",
+                    "must_avoid": "정답 직접 발화, 추궁",
+                }
+            else:  # unclear
+                held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
+                if held_turns >= 3:
+                    print(f"       · [stage-gate] pending 3턴 경과 → 해제, Stage 유지", flush=True)
+                    self.pending_stage_complete = False
+                    self.pending_stage_complete_since_turn = None
+                decision["stage_complete"] = False
+        elif decision.get("stage_complete"):
+            # 최초로 완료 조건 충족 감지 → 퀴즈 출제 모드로 전환
+            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 "
+                  f"— 서연이 스몰 퀴즈 출제", flush=True)
+            self.pending_stage_complete = True
+            self.pending_stage_complete_since_turn = self.turn_count
+            decision["stage_complete"] = False  # quiz 정답 전엔 advance 막음
+            decision["speaking_agents"] = ["ai_2"]
+            decision["ai_1_directive"] = None
+            decision["ai_3_directive"] = None
+            decision["ai_2_directive"] = {
+                "role": "진행자 (Stage 완료 확인 — 스몰 퀴즈)",
+                "speech_goal": (
+                    f"사용자가 양쪽 그룹 차이를 잘 설명했다. 마지막으로 적용 퀴즈로 확인. "
+                    f"퀴즈 질문 그대로: '{quiz.get('question','')}'"
+                ),
+                "must_include": f"퀴즈 질문 그대로 한 번 묻기 — '{quiz.get('question','')}'",
+                "must_avoid": "정답 직접 발화, 답 힌트, 추가 설명",
+            }
+
+    def _apply_stage_gate_consent_legacy(self, decision, user_utterance):
+        """completion_quiz가 없는 Stage용 종래 consent 방식 (Stage 2/3)."""
         consent = _detect_stage_advance_consent(user_utterance)
         if self.pending_stage_complete:
             if consent == "consent":
-                print(f"       · [stage-gate] 사용자 승인 감지 → stage_complete=True 확정", flush=True)
+                print(f"       · [stage-gate consent] 사용자 승인 → stage_complete=True", flush=True)
                 decision["stage_complete"] = True
                 self.pending_stage_complete = False
                 self.pending_stage_complete_since_turn = None
             elif consent == "reject":
-                print(f"       · [stage-gate] 사용자 거부 감지 → pending 해제, Stage 유지", flush=True)
+                print(f"       · [stage-gate consent] 거부 → pending 해제, Stage 유지", flush=True)
                 decision["stage_complete"] = False
                 self.pending_stage_complete = False
                 self.pending_stage_complete_since_turn = None
             else:
                 held_turns = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
                 if held_turns >= 2:
-                    print(f"       · [stage-gate] pending 2턴 경과 → 해제, Stage 유지", flush=True)
+                    print(f"       · [stage-gate consent] pending 2턴 경과 → 해제", flush=True)
                     self.pending_stage_complete = False
                     self.pending_stage_complete_since_turn = None
-                decision["stage_complete"] = False  # pending 중엔 advance 막음
+                decision["stage_complete"] = False
         elif decision.get("stage_complete"):
-            # 최초로 완료 조건 충족 감지 → 승인 질문 모드로 전환
-            print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 — 서연 확인 질문 삽입", flush=True)
+            print(f"       · [stage-gate consent] 완료 조건 충족 — 서연 확인 질문", flush=True)
             self.pending_stage_complete = True
             self.pending_stage_complete_since_turn = self.turn_count
-            decision["stage_complete"] = False  # 바로 advance 막기
-            # 서연(ai_2) 혼자 발화하도록 강제 + 확인 directive 주입
+            decision["stage_complete"] = False
             decision["speaking_agents"] = ["ai_2"]
             decision["ai_1_directive"] = None
             decision["ai_3_directive"] = None
@@ -876,8 +963,8 @@ class CollaborativeSession:
                     "지금까지 사용자가 한 설명을 한 줄로 짧게 요약해 재진술한 뒤, "
                     "'이렇게 이해하고 다음 단계로 넘어가도 될까?' 라고 분명하게 승인을 묻는다."
                 ),
-                "must_include": "사용자가 방금 말한 핵심 표현을 그대로 짧게 인용 + 승인 질문 (예: '~ 이렇게 정리해도 돼? 다음으로 넘어가도 될까?')",
-                "must_avoid": "새로운 개념 도입, 긴 설명, 두 개 이상의 질문",
+                "must_include": "사용자 핵심 표현 짧게 인용 + 승인 질문",
+                "must_avoid": "새로운 개념 도입, 긴 설명",
             }
 
     def _detect_user_repeat_or_frustration(self, user_utterance):
