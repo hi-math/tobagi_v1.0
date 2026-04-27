@@ -137,32 +137,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
     def _cps_heatmap():
         return cps_heatmap_figure(config, learner_models)
 
-    def _task_panel_html():
-        """오른쪽 패널 상단에 항상 노출되는 '현재 과제' 카드.
-        session.current_stage 기준으로 _stage_card 와 같은 모양을 그려서
-        스크롤되며 사라지는 채팅 stage_card 의 영구 미러 역할을 한다.
-        session.all_stages_complete=True 가 셋되면 마무리 카드로 교체.
-        """
-        try:
-            if getattr(session, "all_stages_complete", False):
-                return (
-                    '<div style="border:2px solid #16a34a; border-radius:10px;'
-                    ' overflow:hidden; margin:0 0 8px 0;">'
-                    '<div style="background:#16a34a; color:white; padding:10px 16px;'
-                    ' font-weight:700;">🎉 모든 Stage 완료</div>'
-                    '<div style="background:#f0fdf4; padding:14px 16px; color:#14532d;">'
-                    '협력학습이 모두 끝났습니다. 채팅창의 마무리 발화와 오른쪽 탭의 분석 결과를 확인해 보세요.'
-                    '</div></div>'
-                )
-            s = session.current_stage_info()
-            return _stage_card(session.current_stage, s)
-        except Exception as e:
-            return (
-                f'<div style="border-left:4px solid #dc2626; background:#fef2f2;'
-                f' padding:8px 12px; border-radius:6px; font-size:0.85em;">'
-                f'과제 패널 렌더 오류: {type(e).__name__}: {e}</div>'
-            )
-
     def _initial_history():
         import traceback
         try:
@@ -223,7 +197,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
             _radar(), _history(), _model_md(),
             _decision_json(), _misconception_timeline(), _cps_heatmap(),
             _checkpoint_md(),
-            _task_panel_html(),
         )
 
     def _chat_only(history, clear_msg=False):
@@ -232,7 +205,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
             "" if clear_msg else gr.update(),
             gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(),
-            gr.update(),
             gr.update(),
         )
 
@@ -396,8 +368,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
                 if not aid or not text:
                     continue
                 history = history + _bubble_messages(aid, AI_NAME_BY_ID[aid], text)
-        # v1.73: task_panel HTML도 함께 반환해서 우상단 패널 갱신.
-        return history, _task_panel_html()
+        return history
 
     # 버전 표시 (lib/__init__.py의 __version__ 단일 소스)
     try:
@@ -450,9 +421,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
                     refresh_all_btn = gr.Button("대시보드 전체 갱신")
 
             with gr.Column(scale=2):
-                # v1.73: 채팅에서 stage_card 가 스크롤로 사라지는 문제 해결.
-                # 탭 위에 항상 보이는 "현재 과제" 패널을 둔다.
-                task_panel = gr.HTML(value=_task_panel_html(), label="현재 과제")
                 with gr.Tabs():
                     with gr.Tab("① 영역 요약"):
                         gr.Markdown("_인지·정의 두 카테고리의 최상위 점수를 바 차트로 조감합니다. 하위 차원은 학습자 모델 탭에서 확인하세요._")
@@ -487,7 +455,7 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
                         cps_plot = gr.Plot(label="CPS 히트맵")
                         gr.Button("갱신").click(_cps_heatmap, outputs=cps_plot)
 
-        auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot, checkpoint_md, task_panel]
+        auto_outputs = [chatbot, msg, radar, hist_plot, model_md, dec_code, misc_plot, cps_plot, checkpoint_md]
 
         send.click(
             echo_user, [msg, chatbot], [msg, chatbot], queue=False
@@ -495,15 +463,13 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
         msg.submit(
             echo_user, [msg, chatbot], [msg, chatbot], queue=False
         ).then(stream_ai, chatbot, auto_outputs)
-        # v1.73: 다음 Stage 버튼은 채팅 + task_panel 두 곳을 갱신.
-        next_btn.click(on_next_stage, chatbot, [chatbot, task_panel])
+        next_btn.click(on_next_stage, chatbot, chatbot)
         refresh_all_btn.click(
             lambda: (
                 _radar(), _history(), _model_md(), _decision_json(),
                 _misconception_timeline(), _cps_heatmap(), _checkpoint_md(),
-                _task_panel_html(),
             ),
-            outputs=[radar, hist_plot, model_md, dec_code, misc_plot, cps_plot, checkpoint_md, task_panel],
+            outputs=[radar, hist_plot, model_md, dec_code, misc_plot, cps_plot, checkpoint_md],
         )
 
         # 침묵 타이머: 120s. 프롬프트 다이어트 이후에도 토큰 예산 아끼려 폴링 주기는 길게.
