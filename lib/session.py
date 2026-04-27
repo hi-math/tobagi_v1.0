@@ -1712,6 +1712,12 @@ class CollaborativeSession:
         """LLM 호출 → sanitize → 그대로 반환. v1.35: 필터·다단 재시도 모두 제거.
         규칙은 프롬프트와 directive로만 통제. 빈 응답일 때만 짧은 generic.
         """
+        # v1.60: pending_stage_complete + 서연 단독이면 LLM 안 부르고 quiz 텍스트 강제
+        force_quiz = self.get_force_quiz_text(student_key)
+        if force_quiz:
+            print(f"       · [ai_utterance {student_key}] pending quiz 강제 발화 — LLM 호출 skip", flush=True)
+            return force_quiz
+
         prompt = self._build_ai_prompt(
             student_key, directive, user_utterance,
             user_mode=user_mode,
@@ -2134,6 +2140,18 @@ class CollaborativeSession:
 
         def _worker(aid):
             directive = decision.get(f"{aid}_directive")
+            # v1.60: pending quiz 강제 발화 — LLM 호출 skip
+            force_quiz = self.get_force_quiz_text(aid)
+            if force_quiz:
+                print(f"       · [ai_stream {aid}] pending quiz 강제 발화 — LLM skip", flush=True)
+                q.put(("start", aid, ""))
+                # 한 글자씩 흘려보내 토큰 스트리밍 모양 흉내 (UI 자연스러움)
+                for ch in force_quiz:
+                    q.put(("update", aid, ch))
+                q.put(("done", aid, force_quiz))
+                q.put(("__worker_end__", aid, None))
+                return
+
             prompt = self._build_ai_prompt(
                 aid, directive, user_utterance,
                 user_mode=self.current_user_mode,
@@ -2427,6 +2445,32 @@ class CollaborativeSession:
             "missing": missing,
             "last_decision": last,
         }
+
+    def get_force_quiz_text(self, agent_id):
+        """v1.60: pending_stage_complete + 서연 단독 발화 turn이면 quiz 질문 텍스트 반환.
+
+        AI 발화 prompt가 directive를 안 보는 v1.41+ 구조 때문에 stage_gate가
+        quiz directive를 주입해도 실제 발화엔 반영 안 됨. 이를 우회해 코드가
+        직접 quiz 질문을 발화 텍스트로 강제.
+
+        반환: quiz 질문 문자열 (강제 발화 대상이면) 또는 None.
+        """
+        if not self.pending_stage_complete or agent_id != "ai_2":
+            return None
+        stage = self.current_stage_info()
+        quiz = stage.get("completion_quiz")
+        if not quiz:
+            return None
+        # 첫 quiz 출제 turn (pending 진입 turn)이면 그대로 묻기.
+        # pending 유지 turn(같은 quiz 답 대기 중)도 짧게 다시 묻기.
+        held = self.turn_count - (self.pending_stage_complete_since_turn or self.turn_count)
+        q = quiz.get("question", "")
+        if held == 0:
+            # 처음 출제
+            return q
+        else:
+            # 다시 묻기 — 부드러운 prefix
+            return f"음, 답이 헷갈리는구나 ㅋㅋ {q}"
 
     def get_stage_intro_message(self):
         """현재 stage의 intro_message (시스템 정의 안내) 반환. 없으면 None.
