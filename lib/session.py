@@ -762,12 +762,22 @@ class CollaborativeSession:
         # === 보조 경로: 발화 키워드 — progress 업데이트 늦을 때만 활용 ===
         # 단, 주 경로가 미완료여도 여기서 자동 완료시키지는 않고 진단 목적으로만 로그.
         if not hit_reason and stage_num == 1:
-            # s1-2: 분류 기준 발견 — 약수 2개 또는 1과 자기자신만
+            # v1.51: 단편적 발화로는 hit 안 되도록 — '소수'/'합성수' 단어 또는
+            # 명시적 일반화 표현이 있을 때만 카운트
             s12 = any(k in combined for k in [
-                "약수가 2개", "약수 2개", "약수 두개", "약수가 두 개", "약수 두 개",
-                "1과 자기자신", "1과 본인", "1과 자신만",
+                "소수는 약수가 2", "소수의 약수가 2", "소수는 약수 2", "소수의 약수 2",
+                "소수는 약수 두", "1과 자기 자신만 약수", "1과 자기자신만 약수",
+                "1과 본인만 약수", "약수가 1과 자기자신",
+                "1과 자기자신뿐인 수가 소수",
             ])
-            print(f"       · [stage-guard s1 키워드] s1-2={s12}", flush=True)
+            s13 = any(k in combined for k in [
+                "합성수는 약수가 3", "합성수의 약수가 3", "합성수는 약수 3",
+                "합성수는 약수가 여러", "합성수는 약수가 많",
+                "합성수는 1과 자기 자신 외", "합성수는 1과 자기자신 외",
+                "약수가 3개 이상인 수가 합성수", "다른 약수도 있는 수가 합성수",
+                "1과 자기자신 외에도 약수",
+            ])
+            print(f"       · [stage-guard s1 키워드] s1-2={s12} s1-3={s13}", flush=True)
 
         elif not hit_reason and stage_num == 2:
             has_23 = "23" in combined
@@ -833,21 +843,36 @@ class CollaborativeSession:
         decision["speaking_agents"] = [addressed]
 
     def _check_quiz_answer(self, user_utterance, quiz):
-        """completion_quiz의 사용자 답변을 검증.
+        """completion_quiz의 사용자 답변을 엄격 검증 (v1.51).
 
-        - 정답 키워드 매칭 + 오답 키워드 우선순위 → ('correct'|'incorrect'|'unclear')
-        - 오답 키워드가 정답 키워드보다 강하게 매칭되면 incorrect (예: "왼쪽" 단독)
+        강화 룰:
+          - quiz question에서 핵심 숫자를 추출 (예: 21).
+          - 사용자 답에 그 숫자가 등장해야 정답·오답 판정 시작.
+          - 숫자 없이 단순 '오른쪽'/'합성수' 단독 발화는 unclear (서연이 다시 묻기).
+          - 정답 키워드 매칭 → correct
+          - 오답 키워드 매칭 → incorrect
+
+        반환: 'correct' | 'incorrect' | 'unclear'
         """
         if not user_utterance or not quiz:
             return "unclear"
         text = user_utterance
+
+        # quiz 질문에서 핵심 숫자 추출
+        question = quiz.get("question") or ""
+        nums = re.findall(r"\d+", question)
+        target_num = nums[0] if nums else None
+
+        # 사용자 답에 핵심 숫자 없으면 unclear (단편 발화 차단)
+        if target_num and target_num not in text:
+            return "unclear"
+
         wrong_keys = quiz.get("wrong_keywords") or []
         right_keys = quiz.get("correct_answers_keywords") or []
 
-        wrong_hit = any(k in text for k in wrong_keys)
         right_hit = any(k in text for k in right_keys)
+        wrong_hit = any(k in text for k in wrong_keys)
 
-        # 둘 다 hit하면 정답 키워드(더 구체적) 우선 (예: "오른쪽인데 합성수")
         if right_hit:
             return "correct"
         if wrong_hit:

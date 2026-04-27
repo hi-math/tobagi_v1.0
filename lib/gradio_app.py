@@ -394,10 +394,6 @@ def launch_ui(*, config, prompts, learner_models, api, share=True):
                         radar = gr.Plot(label="사용자 영역 요약 (인지/정의)")
                         gr.Button("갱신").click(_radar, outputs=radar)
                     with gr.Tab("② 지식 체크포인트"):
-                        gr.Markdown(
-                            "_Stage별 지식 체크포인트. 사용자 발화에서 포착되면 ✅, "
-                            "AI는 사전지식(📚)/관찰학습(👁)/반복학습(💡) 으로 상태 표시._"
-                        )
                         checkpoint_md = gr.Markdown()
                         gr.Button("갱신").click(_checkpoint_md, outputs=checkpoint_md)
                     with gr.Tab("③ 학습자 모델"):
