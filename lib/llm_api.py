@@ -210,15 +210,28 @@ class OpenAIAPI:
         # api_key=None이면 SDK가 OPENAI_API_KEY 환경변수에서 자동 로드
         self._client = _OpenAI(api_key=api_key) if api_key else _OpenAI()
 
+    _REASONING_PREFIXES = ("o1", "o3", "o4", "gpt-5")
+
+    def _is_reasoning_model(self, name):
+        if not name:
+            return False
+        m = name.lower()
+        for p in self._REASONING_PREFIXES:
+            if m.startswith(p):
+                return True
+        return False
+
     def _build_kwargs(self, prompt, max_tokens, temperature, model, json_mode):
         kwargs = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": temperature,
         }
+        if self._is_reasoning_model(model):
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["max_tokens"] = max_tokens
+            kwargs["temperature"] = temperature
         if json_mode:
-            # OpenAI JSON 모드 — 프롬프트에 'json' 단어가 포함되어야 함
             kwargs["response_format"] = {"type": "json_object"}
         return kwargs
 
