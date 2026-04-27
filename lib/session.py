@@ -1690,11 +1690,19 @@ class CollaborativeSession:
             mis_containers.append(user_lm["task_achievement"]["misconceptions"])
         if "cognitive_state" in user_lm and "misconceptions" in user_lm["cognitive_state"]:
             mis_containers.append(user_lm["cognitive_state"]["misconceptions"])
+
+        # v1.45: 오개념 감지 진단 로그
+        mc_added = analysis.get("misconception_changes", {}).get("added", []) or []
+        mc_removed = analysis.get("misconception_changes", {}).get("removed", []) or []
+        if mc_added or mc_removed:
+            print(f"       · [misconception] added={mc_added} removed={mc_removed}",
+                  flush=True)
+
         for mis in mis_containers:
             if not isinstance(mis.get("value"), list):
                 mis["value"] = []
             mis.setdefault("history", [])
-            for add in analysis.get("misconception_changes", {}).get("added", []):
+            for add in mc_added:
                 if add not in mis["value"]:
                     mis["value"].append(add)
                     mis["history"].append({
@@ -1702,7 +1710,7 @@ class CollaborativeSession:
                         "event": "added", "item": add, "value": list(mis["value"]),
                         "evidence": "",
                     })
-            for rem in analysis.get("misconception_changes", {}).get("removed", []):
+            for rem in mc_removed:
                 if rem in mis["value"]:
                     mis["value"].remove(rem)
                     mis["history"].append({
