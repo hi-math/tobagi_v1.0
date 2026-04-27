@@ -941,6 +941,22 @@ class CollaborativeSession:
                     self.pending_stage_complete = False
                     self.pending_stage_complete_since_turn = None
                 decision["stage_complete"] = False
+                # v1.59: pending 유지 turn에도 서연이 quiz 다시 출제하도록 directive 재주입
+                # (이전 버그: 매 turn 새 analyze LLM이 directive 덮어써 quiz 사라짐)
+                if self.pending_stage_complete:
+                    print(f"       · [stage-gate] pending 유지 — 서연 quiz 재출제 directive 주입", flush=True)
+                    decision["speaking_agents"] = ["ai_2"]
+                    decision["ai_1_directive"] = None
+                    decision["ai_3_directive"] = None
+                    decision["ai_2_directive"] = {
+                        "role": "진행자 (퀴즈 답 대기 중)",
+                        "speech_goal": (
+                            f"사용자가 아직 quiz에 답하지 않았다. 부드럽게 같은 질문을 다시 던지거나 "
+                            f"짧은 정리 후 답을 유도. 퀴즈: '{quiz.get('question','')}'"
+                        ),
+                        "must_include": f"21 분류 다시 묻기 — '{quiz.get('question','')}'",
+                        "must_avoid": "다른 주제 전환, 정답 발화, 새 개념 도입",
+                    }
         elif decision.get("stage_complete"):
             # 최초로 완료 조건 충족 감지 → 퀴즈 출제 모드로 전환
             print(f"       · [stage-gate] Stage {self.current_stage} 완료 조건 충족 "
