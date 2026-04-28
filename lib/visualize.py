@@ -193,7 +193,7 @@ def radar_figure(config, learner_models):
                palette=["#E67E22", "#D35400", "#A04000", "#6E2C00"],
                label_color="#6E2C00")
 
-    name = learner_models["user"].get("student_name", "사용자")
+    name = learner_models["user"].get("student_name", "또바기")
     fig.suptitle(f"{name} 학습자 모델 — 4개 영역 요약 (하위요소는 학습자 모델 패널 참고)",
                  fontsize=13, fontweight="bold", y=1.02)
     fig.tight_layout()
@@ -459,7 +459,7 @@ def checkpoint_markdown(config, learner_models):
 
     # 사용자 + 3 AI 순서
     learner_order = [
-        ("user", learner_models.get("user", {}).get("student_name", "사용자")),
+        ("user", learner_models.get("user", {}).get("student_name", "또바기")),
     ]
     for aid in ("ai_1", "ai_2", "ai_3"):
         if aid in learner_models:

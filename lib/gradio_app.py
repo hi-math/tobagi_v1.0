@@ -176,7 +176,8 @@ def launch_ui(*, config, prompts, learner_models, api, share=True, reset=True):
 
             speaker = m.get("speaker", "")
             content = m.get("content", "")
-            if speaker == "사용자":
+            # v1.82: 사용자 이름이 "또바기"로 변경됨. 구버전 호환을 위해 둘 다 인정.
+            if speaker in ("또바기", "사용자"):
                 history.append({"role": "user", "content": content})
                 continue
 

@@ -204,7 +204,7 @@ def init_learners(config):
     각 페르소나의 initial_learner_state / initial_self_efficacy를 override로 반영.
     """
     ai_students = config["personas"]["ai_students"]
-    learners = {"user": create_learner_model_instance(config, "사용자")}
+    learners = {"user": create_learner_model_instance(config, "또바기")}
     for aid, info in ai_students.items():
         learners[aid] = create_learner_model_instance(
             config,

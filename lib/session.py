@@ -2150,7 +2150,7 @@ class CollaborativeSession:
         self.current_user_mode = detect_user_mode(user_utterance)
 
         self.conversation.append({
-            "speaker": "사용자",
+            "speaker": "또바기",
             "content": user_utterance,
             "stage": self.current_stage,
             "mode": self.current_user_mode,
