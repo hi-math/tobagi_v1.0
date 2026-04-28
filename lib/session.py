@@ -2048,9 +2048,12 @@ class CollaborativeSession:
         # AI 학생들이 자기 발화로 직접 articulate한 cp들을 각자 learner_model에 기록.
         # propagate_checkpoints_to_ai 와 별도 — 사용자 hit이 아니라 AI 자신의 발화 시연.
         ai_demos = analysis.get("ai_demonstrated_checkpoints") or {}
+        # v1.81: 직전 turn의 demos를 self에 저장 (dump_stage_state에서 출력)
+        self._last_ai_demos = ai_demos if isinstance(ai_demos, dict) else None
         if isinstance(ai_demos, dict) and ai_demos:
             try:
                 from .learner_model import apply_checkpoint_hits
+                any_applied = False
                 for aid, cp_ids in ai_demos.items():
                     if aid not in self.AI_KEYS:
                         continue
@@ -2066,9 +2069,15 @@ class CollaborativeSession:
                         source="demonstrated",
                     )
                     if added:
+                        any_applied = True
                         print(f"       · [ai-demo] {aid} 시연 cp={cp_ids} (+{added}개 신규)", flush=True)
+                if not any_applied:
+                    print(f"       · [ai-demo] LLM 출력 demos={ai_demos} — 모두 이미 hit 또는 빈 리스트", flush=True)
             except Exception as e:
                 print(f"       · [ai-demo] 적용 실패: {e}", flush=True)
+        else:
+            # 진단: LLM이 demos 필드를 아예 안 출력했는지 빈 dict인지 확인
+            print(f"       · [ai-demo] LLM이 ai_demonstrated_checkpoints 미출력 또는 빈 dict (raw={ai_demos!r})", flush=True)
 
         if "speaking_agents" not in decision or decision["speaking_agents"] is None:
             decision["speaking_agents"] = [
@@ -2589,6 +2598,36 @@ class CollaborativeSession:
             print(f"   correct keywords: {len(quiz.get('correct_answers_keywords', []))}개")
         else:
             print("   (없음 — legacy consent 방식)")
+        print()
+
+        # v1.81: AI 학생 체크포인트 진척 + 직전 시연 dump
+        print("== AI 학생 체크포인트 진척 (Stage", self.current_stage, ") ==")
+        ai_progresses = {}
+        for aid in self.AI_KEYS:
+            inst = self.learner_models.get(aid) or {}
+            ap = (inst.get("checkpoint_progress") or {}).get(sk) or {}
+            hit_list = sorted(
+                (cid, (v.get("source") if isinstance(v, dict) else "?"))
+                for cid, v in ap.items()
+                if isinstance(v, dict) and v.get("hit")
+            )
+            ai_progresses[aid] = hit_list
+            name = (self.config["personas"]["ai_students"].get(aid) or {}).get("name", aid)
+            level = (self.config["personas"]["ai_students"].get(aid) or {}).get("level", "?")
+            if hit_list:
+                pretty = ", ".join(f"{cid}({src})" for cid, src in hit_list)
+            else:
+                pretty = "(없음)"
+            print(f"   {name}({aid}, 수준 {level}): {pretty}")
+        print()
+
+        # 직전 turn analyze 결과의 AI 시연 cp (있으면)
+        last_demos = getattr(self, "_last_ai_demos", None)
+        if last_demos:
+            print("== 직전 턴 ai_demonstrated_checkpoints ==")
+            print(f"   {last_demos}")
+            print()
+
         return {
             "stage": self.current_stage,
             "pending_stage_complete": self.pending_stage_complete,
@@ -2596,6 +2635,8 @@ class CollaborativeSession:
             "hit_ids": hit_ids,
             "missing": missing,
             "last_decision": last,
+            "ai_checkpoint_progress": ai_progresses,
+            "last_ai_demos": last_demos,
         }
 
     def get_force_quiz_text(self, agent_id):
