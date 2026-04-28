@@ -30,7 +30,7 @@
 # 버전 — 매 커밋마다 +0.01 수동 증가 (단일 source of truth)
 # 이 값이 Gradio UI 상단에 자동 표시된다.
 # ============================================================
-__version__ = "v1.79"
+__version__ = "v1.80"
 
 from .config_loader import load_config, load_json, load_md
 from .learner_model import create_learner_model_instance, init_learners

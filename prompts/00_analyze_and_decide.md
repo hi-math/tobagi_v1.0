@@ -199,6 +199,24 @@
 - 최근 1턴 우선, 모호하면 최근 2턴까지 참고.
 - 이미 hit된 항목 재등장도 포함 OK (서버가 idempotent 처리).
 
+### `ai_demonstrated_checkpoints` — AI 학생들이 직접 시연한 체크포인트
+세 AI 학생(민준·서연·연우)이 **`recent_dialogue`에서 자기 발화로 직접 articulate한** 체크포인트를 학생별로 기록한다. 이는 AI 학생의 학습 진척을 그들 자신의 learner_model에 반영하기 위한 것이다.
+
+판정 기준은 사용자 `checkpoint_hits`와 동일 — 그 학생이 cp의 핵심 내용을 자기 발화로 명시했으면 인정.
+
+- **민준이 발화로 articulate한 cp**: `ai_1` 키에 cp_id 리스트
+- **서연이 발화로 articulate한 cp**: `ai_2` 키에 cp_id 리스트
+- **연우가 발화로 articulate한 cp**: `ai_3` 키에 cp_id 리스트
+- 호응만("응", "맞아") 한 발화나 의문문은 시연 아님 — **명시적 articulate**만
+- 추측·추정문("그럼 ~ 인 거야?")은 시연 아님 (확신 있는 평서문만)
+- 같은 cp가 한 학생에 의해 여러 턴 반복 articulate돼도 cp_id 한 번만 리스트에 등장
+- AI가 이미 prior로 알고 있는 cp도 articulate하면 등록 OK (서버가 idempotent 처리)
+- 사용자가 "정확해" 식으로 검증해 주면 시연 신뢰도 ↑ (그러나 검증 없어도 명확한 articulate면 인정)
+
+**시간 범위**: 최근 4~6턴까지의 AI 발화 검토.
+
+기본값: `{"ai_1": [], "ai_2": [], "ai_3": []}` — 이번 턴 새 시연 없으면 빈 리스트.
+
 ### `self_efficacy_delta` — 자기효능감 신호 감지
 사용자의 발화에서 **자신감의 변화**가 드러나면 `+1` 또는 `-1`을 관련 Stage 문항에 적용한다. 변화 단서가 없으면 `[]` (빈 배열).
 
@@ -317,6 +335,7 @@
       {"dimension": "action_taking", "evidence_feature": "반례 제시", "quote": "9는 홀수인데 소수 아니잖아", "confidence": 0.9}
     ],
     "checkpoint_hits": ["s1-1", "s1-2", "s1-5"],
+    "ai_demonstrated_checkpoints": {"ai_1": ["s1-2"], "ai_2": [], "ai_3": ["s1-2", "s1-3"]},
     "self_efficacy_delta": [
       {"item_id": "se_02", "delta": 1, "reason": "소수·합성수 구분 근거 제시에 자신감"}
     ],

@@ -2044,6 +2044,32 @@ class CollaborativeSession:
             except Exception as e:
                 print(f"       · [checkpoint] 적용 실패: {e}", flush=True)
 
+        # --- v1.80: AI 학생 시연 체크포인트 적용 ---
+        # AI 학생들이 자기 발화로 직접 articulate한 cp들을 각자 learner_model에 기록.
+        # propagate_checkpoints_to_ai 와 별도 — 사용자 hit이 아니라 AI 자신의 발화 시연.
+        ai_demos = analysis.get("ai_demonstrated_checkpoints") or {}
+        if isinstance(ai_demos, dict) and ai_demos:
+            try:
+                from .learner_model import apply_checkpoint_hits
+                for aid, cp_ids in ai_demos.items():
+                    if aid not in self.AI_KEYS:
+                        continue
+                    if not isinstance(cp_ids, list) or not cp_ids:
+                        continue
+                    cp_ids = [str(c).strip() for c in cp_ids if c]
+                    inst = self.learner_models.get(aid)
+                    if not inst:
+                        continue
+                    added = apply_checkpoint_hits(
+                        inst, cp_ids,
+                        stage=self.current_stage, turn=self.turn_count,
+                        source="demonstrated",
+                    )
+                    if added:
+                        print(f"       · [ai-demo] {aid} 시연 cp={cp_ids} (+{added}개 신규)", flush=True)
+            except Exception as e:
+                print(f"       · [ai-demo] 적용 실패: {e}", flush=True)
+
         if "speaking_agents" not in decision or decision["speaking_agents"] is None:
             decision["speaking_agents"] = [
                 aid for aid in self.AI_KEYS if decision.get(f"{aid}_directive")
